@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">필름 카메라</string>
+    <string name="title_activity_main">필름 카메라</string>
+    <string name="package_name">com.filmcam.app</string>
+    <string name="custom_url_scheme">com.filmcam.app</string>
+</resources>
