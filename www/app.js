@@ -227,6 +227,19 @@ async function applyShutter() {
   }
 }
 
+let imageCapture = null;
+
+// 이 기기가 실제로 무엇을 지원하는지 알려준다 (초점·LED는 기기마다 다름)
+function reportCaps() {
+  let caps = {};
+  try { caps = track()?.getCapabilities?.() || {}; } catch {}
+  const parts = [video.videoWidth + "×" + video.videoHeight];
+  parts.push(caps.focusMode ? "초점 O" : "초점 X");
+  parts.push(caps.torch ? "LED O" : "LED X");
+  if (imageCapture) parts.push("고화질 촬영 O");
+  showToast(parts.join(" · "));
+}
+
 function tryFocus(m, nx, ny) {
   const t = track();
   if (!t?.getCapabilities) return false;
@@ -371,21 +384,42 @@ void main() {
       // 음영 그라데이션은 한쪽이 어두우므로 minF 기준을 절대 통과할 수 없다.
       float pit = minF - lumC;                             // 가장 어두운 방향조차 나보다 밝음
       float redPit = redC - maxRedF;                       // 가장 붉은 방향조차 나보다 덜 붉음
+
+      // 선형 구조 배제 (Frangi 원리):
+      // 잡티는 '덩어리'라 어느 축으로 잘라도 골이 깊다.
+      // 주름·콧볼 골은 '선'이라 결을 따라 자르면 골이 얕다 → 가장 얕은 축을 기준으로 판정.
+      // 골 길이가 샘플 반경보다 짧아도 걸러지도록 두 배율에서 모두 검사한다.
+      // 배율마다 '가장 얕은 축'을 재고, 그중 가장 덩어리다운 배율을 채택한다.
+      // (작은 배율은 잡티 내부에서 평탄해 보이므로 최솟값을 쓰면 잡티까지 걸러진다)
+      float rnd1 = 1.0, rnd2 = 1.0;
+      for (int i = 0; i < 4; i++) {
+        float ra = 0.7853982 * float(i);
+        vec2 rd = vec2(cos(ra), sin(ra));
+        vec2 o1 = rd * uRadius * 0.55 * uTexel;
+        vec2 o2 = rd * uRadius * 1.15 * uTexel;
+        rnd1 = min(rnd1, (lumOf(texture2D(uFrame, uv + o1).rgb)
+                        + lumOf(texture2D(uFrame, uv - o1).rgb)) * 0.5 - lumC);
+        rnd2 = min(rnd2, (lumOf(texture2D(uFrame, uv + o2).rgb)
+                        + lumOf(texture2D(uFrame, uv - o2).rgb)) * 0.5 - lumC);
+      }
+      float roundness = max(rnd1, rnd2);
       float th = 0.045 - 0.014 * uBlemish;
       float spot = max(smoothstep(th * 0.5, th, pit),
-                       smoothstep(th * 0.6, th * 1.2, redPit) * 0.85);
+                       smoothstep(th * 0.8, th * 1.6, redPit) * 0.7);
+      spot *= smoothstep(th * 0.20, th * 0.55, roundness);  // 선형 구조(주름·골) 배제
+      spot *= 1.0 - mk.b;                                   // 해부학적 제외 구역(콧볼 골 등)
       spot *= smoothstep(0.008, 0.030, lumA - lumC);       // 국소성 (보조 게이트)
       spot *= 1.0 - smoothstep(0.26, 0.42, lumF - lumC);   // 진한 점(Mole) 보존
       spot *= smoothstep(0.12, 0.28, c.g);                 // 극암부(머리카락 등) 보호
       spot *= smoothstep(0.10, 0.22, minI);                // 검은 구멍 인접(콧구멍 테두리) 보호
       spot *= 1.0 - smoothstep(0.20, 0.30, pit);           // 너무 깊은 함몰은 구멍이지 잡티가 아님
-      float glare = smoothstep(th * 0.5, th, lumC - maxF) * 0.55 * uBlemish;   // 사방보다 밝은 반점만
+      float glare = smoothstep(th * 0.5, th, lumC - maxF) * 0.55 * uBlemish * (1.0 - mk.b);   // 사방보다 밝은 반점만
       spot = min(spot * 0.9 * uBlemish, 0.9);
 
       // 조명 결함 복구: 밝기 '배율'만 조정 (Dodge/Burn) — 색·질감 불변, 상한 존재.
       // 덧셈이 아닌 제한된 곱셈이라 주변 구조물이 섞여 들어올 수 없다.
       float liftL = clamp(lumF - lumC, 0.0, 0.12);         // 결함 깊이 (상한)
-      float dodge = min(1.0 + (liftL / max(lumC, 0.05)) * spot, 1.35);
+      float dodge = min(1.0 + (liftL / max(lumC, 0.05)) * spot, 1.22);
       float dropL = clamp(lumC - lumF, 0.0, 0.10);
       float burn = max(1.0 - (dropL / max(lumC, 0.05)) * glare, 0.78);
       r = c * dodge * burn;
@@ -700,13 +734,29 @@ function camPreviewFrame() {
 }
 
 /* ===== 고해상도 촬영 → 편집 화면 ===== */
-function captureHighRes() {
+async function captureHighRes() {
+  // 가능하면 프리뷰 스트림이 아니라 '센서 원본 정지 사진'을 받아 처리한다.
+  // 프리뷰는 대역폭 때문에 압축·축소되지만, 정지 사진은 센서 해상도 그대로다.
+  let src = video, sw0 = video.videoWidth, sh0 = video.videoHeight;
+  if (imageCapture) {
+    try {
+      const blob = await imageCapture.takePhoto();
+      const bmp = await createImageBitmap(blob);
+      const arPrev = video.videoWidth / video.videoHeight;
+      const arShot = bmp.width / bmp.height;
+      // 비율이 다르면 얼굴 좌표가 어긋나므로 프리뷰 프레임을 쓴다
+      if (Math.abs(arShot - arPrev) < 0.03 && bmp.width >= video.videoWidth) {
+        src = bmp; sw0 = bmp.width; sh0 = bmp.height;
+      } else { bmp.close?.(); }
+    } catch (e) { /* 미지원 기기는 조용히 프리뷰 경로 사용 */ }
+  }
+
   // 원본 해상도로 1프레임 처리 (피부·윤곽·렌즈만 굽고, 색·필름은 편집에서)
-  glCanvas.width = video.videoWidth;
-  glCanvas.height = video.videoHeight;
-  const faceW = lastLandmarks ? Math.abs(lastLandmarks[454].x - lastLandmarks[234].x) * video.videoWidth : 0;
-  drawGL(video, {
-    srcW: video.videoWidth, srcH: video.videoHeight,
+  glCanvas.width = sw0;
+  glCanvas.height = sh0;
+  const faceW = lastLandmarks ? Math.abs(lastLandmarks[454].x - lastLandmarks[234].x) * sw0 : 0;
+  drawGL(src, {
+    srcW: sw0, srcH: sh0,
     radius: Math.max(2.5, faceW * 0.030),
     smooth: (skinOn && lastLandmarks) ? skinAmt : 0,
     blemish: (blemishOn && lastLandmarks) ? blemAmt : 0,
@@ -720,7 +770,7 @@ function captureHighRes() {
   });
 
   // 미러링 + 화각 크롭을 구워서 편집 원본 확정
-  const { sx, sy, sw, sh } = cropRect(video.videoWidth, video.videoHeight);
+  const { sx, sy, sw, sh } = cropRect(sw0, sh0);
   const cw = Math.round(sw), ch = Math.round(sh);
   capCanvas.width = cw; capCanvas.height = ch;
   capCtx.save();
@@ -729,8 +779,8 @@ function captureHighRes() {
   capCtx.restore();
 
   shotLandmarks = lastLandmarks;
-  shotCropX = sw / video.videoWidth;
-  shotCropY = sh / video.videoHeight;
+  shotCropX = sw / sw0;
+  shotCropY = sh / sh0;
   shotMirror = facing === "user";
   enterEdit();
 }
@@ -865,9 +915,12 @@ async function startStream() {
     await new Promise(r => setTimeout(r, 120));   // 기기가 카메라를 놓을 시간
   }
   // 제약 조건을 단계적으로 완화하며 시도 — 기기가 특정 조합을 거부해도 전환 성공
+  // 센서가 주는 만큼 최대한 크게 요청 → 실패하면 단계적으로 낮춘다
   const tries = [
+    { video: { facingMode: { exact: facing }, width: { ideal: 2160 }, height: { ideal: 2880 } }, audio: false },
+    { video: { facingMode: { exact: facing }, width: { ideal: 1440 }, height: { ideal: 1920 } }, audio: false },
     { video: { facingMode: { exact: facing }, width: { ideal: 1080 }, height: { ideal: 1440 } }, audio: false },
-    { video: { facingMode: facing, width: { ideal: 1080 }, height: { ideal: 1440 } }, audio: false },
+    { video: { facingMode: facing, width: { ideal: 1440 }, height: { ideal: 1920 } }, audio: false },
     { video: { facingMode: facing }, audio: false },
     { video: true, audio: false },
   ];
@@ -879,6 +932,14 @@ async function startStream() {
   if (!stream) throw lastErr || new Error("카메라를 열 수 없어요");
   video.srcObject = stream;
   await video.play();
+  // 정지 사진 전용 고해상도 경로: 프리뷰 스트림이 아니라 센서 원본을 받아온다
+  imageCapture = null;
+  try {
+    const t0 = track();
+    if (window.ImageCapture && t0) imageCapture = new ImageCapture(t0);
+  } catch { imageCapture = null; }
+  reportCaps();
+
   prevW = Math.round(video.videoWidth * PREVIEW_SCALE);
   prevH = Math.round(video.videoHeight * PREVIEW_SCALE);
   glCanvas.width = prevW; glCanvas.height = prevH;
@@ -1089,6 +1150,24 @@ function buildFaceMask(w, h, L) {
   }
   maskCtx.restore();
 
+  // 콧볼 골(alar crease)·팔자 시작부 → B 채널 = 잡티 탐지 제외.
+  // 이 골들은 '지워야 할 잡티'가 아니라 '남겨야 할 정상 굴곡'이다.
+  // (주름 완화는 A 채널을 쓰므로 여기서 계속 동작한다)
+  maskCtx.save();
+  maskCtx.filter = "blur(" + faceW * 0.025 + "px)";
+  maskCtx.strokeStyle = "rgb(0,0,255)";
+  maskCtx.lineCap = "round";
+  maskCtx.lineWidth = faceW * 0.10;
+  for (const pair of [[L[129], L[61]], [L[358], L[291]]]) {
+    const a = pair[0], b = pair[1];
+    if (!a || !b) continue;
+    maskCtx.beginPath();
+    maskCtx.moveTo(a.x * w, a.y * h);
+    maskCtx.lineTo((a.x + (b.x - a.x) * 0.40) * w, (a.y + (b.y - a.y) * 0.40) * h);
+    maskCtx.stroke();
+  }
+  maskCtx.restore();
+
   // 눈 흰자 → G 채널 (눈 보정 전용 영역)
   maskCtx.save();
   maskCtx.filter = "blur(" + w * 0.006 + "px)";
@@ -1121,15 +1200,15 @@ $("shotBtn").addEventListener("click", async () => {
   if (flashMode === "screen") {
     screenFlash.classList.add("on");      // 전면: 화면 전체를 흰색으로
     await sleep(420);
-    captureHighRes();
+    await captureHighRes();
     await sleep(140);
     screenFlash.classList.remove("on");
   } else if (flashMode === "torch") {
     const ok = await setTorch(true);      // 후면: LED 라이트
     await sleep(ok ? 450 : 0);
-    captureHighRes();
+    await captureHighRes();
     if (ok) { await sleep(120); setTorch(false); }
   } else {
-    captureHighRes();
+    await captureHighRes();
   }
 });
