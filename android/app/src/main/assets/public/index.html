@@ -18,77 +18,99 @@
     <button id="startBtn">카메라 켜기</button>
   </div>
 
-  <canvas class="frame" id="out" style="display:none"></canvas>
-
+  <!-- 상단 아이콘 바 -->
   <div class="topbar" id="camTop" style="display:none">
-    <div class="status" id="status"><span class="led"></span><span id="statusText">얼굴 찾는 중…</span></div>
-    <button class="icon-btn" id="wbBtn" title="화이트 밸런스">☀</button>
-    <button class="icon-btn active" id="flashBtn" title="화면 플래시">⚡</button>
-    <button class="icon-btn" id="flipBtn" title="카메라 전환">↺</button>
+    <button class="ic" id="settingsBtn" title="보정">⚙</button>
+    <button class="ic" id="flashBtn" title="플래시">⚡<sub id="flashTag">off</sub></button>
+    <button class="ic" id="ssBtn" title="셔터스피드">⏱<sub id="ssTag">A</sub></button>
+    <button class="ic" id="ratioBtn" title="화면 비율">▤<sub id="ratioTag">3:4</sub></button>
+    <button class="ic" id="focalBtn" title="화각">◎<sub id="focalTag">28</sub></button>
+    <button class="ic on" id="filmBtn" title="필름">✦<sub id="filmTag">1</sub></button>
+    <button class="ic" id="wbBtn" title="화이트 밸런스">☀</button>
   </div>
 
+  <div class="stagewrap"><canvas id="out"></canvas></div>
+  <div class="status" id="status" style="display:none"><span class="led"></span><span id="statusText">얼굴 찾는 중…</span></div>
   <div id="focusRing" aria-hidden="true"></div>
 
+  <!-- 하단 -->
   <div class="bottom" id="camBottom" style="display:none">
-    <!-- 보정 ON/OFF -->
-    <div class="pillrow" role="group" aria-label="보정">
-      <button class="pill on" id="tgSkin">피부결</button>
-      <button class="pill on" id="tgBlemish">잡티</button>
-      <button class="pill on" id="tgContour">윤곽</button>
-      <button class="pill on" id="tgFilm">필름</button>
-    </div>
-    <!-- 피부 보정 세기 (튜닝용 슬라이더) -->
-    <div class="filmbar" id="skinBar">
-      <div class="pillrow sliderrow">
-        <span class="slabel">피부결</span>
-        <input type="range" id="skinAmt" min="0" max="100" value="40" />
-        <output class="sval" id="skinAmtVal">40</output>
+    <!-- 팝업 바 (아이콘 누르면 하나씩 열림) -->
+    <div class="pop" id="skinBar">
+      <div class="poprow">
+        <span class="plabel">피부결</span>
+        <div class="seg" id="skinSeg">
+          <button class="pill" data-skin="0">끄기</button>
+          <button class="pill" data-skin="30">기본</button>
+          <button class="pill on" data-skin="60">자연스럽게</button>
+          <button class="pill" data-skin="90">강하게</button>
+        </div>
       </div>
-      <div class="pillrow sliderrow">
-        <span class="slabel">잡티</span>
+      <div class="poprow">
+        <span class="plabel">잡티</span>
         <input type="range" id="blemAmt" min="0" max="100" value="60" />
         <output class="sval" id="blemAmtVal">60</output>
       </div>
+      <div class="poprow">
+        <span class="plabel">윤곽</span>
+        <div class="seg"><button class="pill on" id="tgContour">켜짐</button></div>
+      </div>
     </div>
 
-    <!-- 화이트 밸런스 (☀ 버튼으로 열기) -->
-    <div class="pillrow" id="wbBar" style="display:none" role="group" aria-label="화이트 밸런스">
-      <button class="pill on" data-wbc="auto">오토</button>
-      <button class="pill" data-wbc="5600">맑음</button>
-      <button class="pill" data-wbc="4500">흐림</button>
-      <button class="pill" data-wbc="3300">노을</button>
+    <div class="pop" id="ssBar">
+      <div class="seg wide">
+        <button class="pill on" data-ss="auto">오토</button>
+        <button class="pill" data-ss="30">1/30</button>
+        <button class="pill" data-ss="60">1/60</button>
+        <button class="pill" data-ss="125">1/125</button>
+        <button class="pill" data-ss="250">1/250</button>
+      </div>
     </div>
 
-    <!-- 필름 프리셋 + 세기 (필름 ON일 때만 표시) -->
-    <div class="filmbar" id="filmBar">
-      <div class="pillrow" id="filmPresets" role="group" aria-label="필름 프리셋">
+    <div class="pop" id="ratioBar">
+      <div class="seg wide">
+        <button class="pill" data-ratio="1:1">1:1</button>
+        <button class="pill on" data-ratio="3:4">3:4</button>
+        <button class="pill" data-ratio="9:16">9:16</button>
+      </div>
+    </div>
+
+    <div class="pop" id="focalBar">
+      <div class="seg wide">
+        <button class="pill on" data-focal="28">28mm</button>
+        <button class="pill" data-focal="35">35mm</button>
+        <button class="pill" data-focal="50">50mm</button>
+      </div>
+    </div>
+
+    <div class="pop" id="filmBar">
+      <div class="seg wide" id="filmPresets">
         <button class="pill on" data-fp="0">필름1</button>
         <button class="pill" data-fp="1">필름2</button>
         <button class="pill" data-fp="2">필름3</button>
         <button class="pill" data-fp="3">필름4</button>
       </div>
-      <div class="pillrow sliderrow">
-        <span class="slabel">세기</span>
+      <div class="poprow">
+        <span class="plabel">세기</span>
         <input type="range" id="filmStrength" min="0" max="100" value="60" />
         <output class="sval" id="filmStrengthVal">60</output>
       </div>
     </div>
 
-    <!-- 셔터스피드 -->
-    <div class="pillrow" role="group" aria-label="셔터스피드">
-      <button class="pill on" data-ss="auto">SS 오토</button>
-      <button class="pill" data-ss="30">1/30</button>
-      <button class="pill" data-ss="60">1/60</button>
-      <button class="pill" data-ss="125">1/125</button>
-      <button class="pill" data-ss="250">1/250</button>
+    <div class="pop" id="wbBar">
+      <div class="seg wide">
+        <button class="pill on" data-wbc="auto">오토</button>
+        <button class="pill" data-wbc="5600">맑음</button>
+        <button class="pill" data-wbc="4500">흐림</button>
+        <button class="pill" data-wbc="3300">노을</button>
+      </div>
     </div>
-    <!-- 화각 -->
-    <div class="pillrow" role="group" aria-label="화각">
-      <button class="pill on" data-focal="28">28mm</button>
-      <button class="pill" data-focal="35">35mm</button>
-      <button class="pill" data-focal="50">50mm</button>
+
+    <div class="shutterrow">
+      <div class="side"></div>
+      <button id="shotBtn" disabled aria-label="사진 찍기"></button>
+      <div class="side"><button class="ic round" id="flipBtn" title="카메라 전환">↺</button></div>
     </div>
-    <button id="shotBtn" disabled aria-label="사진 찍기"></button>
   </div>
 </div>
 
