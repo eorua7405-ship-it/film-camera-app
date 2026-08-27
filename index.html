@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>필름 카메라</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- ===== 촬영 화면 ===== -->
+<div class="screen on" id="camScreen">
+  <div class="placeholder" id="placeholder">
+    <div class="lens" aria-hidden="true"></div>
+    <h1>필름 카메라<span class="dot">.</span></h1>
+    <p>필름 룩으로 찍고, 세부 보정은 찍은 뒤에.<br />모든 처리는 내 기기 안에서만 이루어져요.</p>
+    <button id="startBtn">카메라 켜기</button>
+  </div>
+
+  <canvas class="frame" id="out" style="display:none"></canvas>
+
+  <div class="topbar" id="camTop" style="display:none">
+    <div class="status" id="status"><span class="led"></span><span id="statusText">얼굴 찾는 중…</span></div>
+    <button class="icon-btn" id="wbBtn" title="화이트 밸런스">☀</button>
+    <button class="icon-btn active" id="flashBtn" title="화면 플래시">⚡</button>
+    <button class="icon-btn" id="flipBtn" title="카메라 전환">↺</button>
+  </div>
+
+  <div id="focusRing" aria-hidden="true"></div>
+
+  <div class="bottom" id="camBottom" style="display:none">
+    <!-- 보정 ON/OFF -->
+    <div class="pillrow" role="group" aria-label="보정">
+      <button class="pill on" id="tgSkin">피부결</button>
+      <button class="pill on" id="tgBlemish">잡티</button>
+      <button class="pill on" id="tgContour">윤곽</button>
+      <button class="pill on" id="tgFilm">필름</button>
+    </div>
+    <!-- 피부 보정 세기 (튜닝용 슬라이더) -->
+    <div class="filmbar" id="skinBar">
+      <div class="pillrow sliderrow">
+        <span class="slabel">피부결</span>
+        <input type="range" id="skinAmt" min="0" max="100" value="40" />
+        <output class="sval" id="skinAmtVal">40</output>
+      </div>
+      <div class="pillrow sliderrow">
+        <span class="slabel">잡티</span>
+        <input type="range" id="blemAmt" min="0" max="100" value="60" />
+        <output class="sval" id="blemAmtVal">60</output>
+      </div>
+    </div>
+
+    <!-- 화이트 밸런스 (☀ 버튼으로 열기) -->
+    <div class="pillrow" id="wbBar" style="display:none" role="group" aria-label="화이트 밸런스">
+      <button class="pill on" data-wbc="auto">오토</button>
+      <button class="pill" data-wbc="5600">맑음</button>
+      <button class="pill" data-wbc="4500">흐림</button>
+      <button class="pill" data-wbc="3300">노을</button>
+    </div>
+
+    <!-- 필름 프리셋 + 세기 (필름 ON일 때만 표시) -->
+    <div class="filmbar" id="filmBar">
+      <div class="pillrow" id="filmPresets" role="group" aria-label="필름 프리셋">
+        <button class="pill on" data-fp="0">필름1</button>
+        <button class="pill" data-fp="1">필름2</button>
+        <button class="pill" data-fp="2">필름3</button>
+        <button class="pill" data-fp="3">필름4</button>
+      </div>
+      <div class="pillrow sliderrow">
+        <span class="slabel">세기</span>
+        <input type="range" id="filmStrength" min="0" max="100" value="60" />
+        <output class="sval" id="filmStrengthVal">60</output>
+      </div>
+    </div>
+
+    <!-- 셔터스피드 -->
+    <div class="pillrow" role="group" aria-label="셔터스피드">
+      <button class="pill on" data-ss="auto">SS 오토</button>
+      <button class="pill" data-ss="30">1/30</button>
+      <button class="pill" data-ss="60">1/60</button>
+      <button class="pill" data-ss="125">1/125</button>
+      <button class="pill" data-ss="250">1/250</button>
+    </div>
+    <!-- 화각 -->
+    <div class="pillrow" role="group" aria-label="화각">
+      <button class="pill on" data-focal="28">28mm</button>
+      <button class="pill" data-focal="35">35mm</button>
+      <button class="pill" data-focal="50">50mm</button>
+    </div>
+    <button id="shotBtn" disabled aria-label="사진 찍기"></button>
+  </div>
+</div>
+
+<!-- ===== 편집 화면 ===== -->
+<div class="screen" id="editScreen">
+  <div class="frame-wrap"><canvas class="frame" id="editOut"></canvas></div>
+  <div class="edit-panel">
+    <div class="row"><label for="wrinkle">주름 완화</label><input type="range" id="wrinkle" min="0" max="100" value="50" /><output id="wrinkleVal">50</output></div>
+    <div class="row"><label for="film">필름 감성</label><input type="range" id="film" min="0" max="100" value="0" /><output id="filmVal">0</output></div>
+    <div class="row"><label for="sharp">선명도</label><input type="range" id="sharp" min="0" max="100" value="15" /><output id="sharpVal">15</output></div>
+    <div class="row"><label for="contrast">콘트라스트</label><input type="range" id="contrast" min="50" max="150" value="100" /><output id="contrastVal">100</output></div>
+    <div class="row"><label for="sat">채도</label><input type="range" id="sat" min="0" max="200" value="100" /><output id="satVal">100</output></div>
+    <div class="seg" role="group" aria-label="화이트 밸런스">
+      <button class="seg-btn on" data-wb="auto">오토</button>
+      <button class="seg-btn" data-wb="3300">3300K</button>
+      <button class="seg-btn" data-wb="4400">4400K</button>
+      <button class="seg-btn" data-wb="5600">5600K</button>
+    </div>
+    <div class="row"><label for="rGain">레드</label><input type="range" id="rGain" min="70" max="130" value="100" /><output id="rGainVal">100</output></div>
+    <div class="row"><label for="gGain">그린</label><input type="range" id="gGain" min="70" max="130" value="100" /><output id="gGainVal">100</output></div>
+    <div class="row"><label for="bGain">블루</label><input type="range" id="bGain" min="70" max="130" value="100" /><output id="bGainVal">100</output></div>
+    <div class="edit-actions">
+      <button id="retakeBtn">다시 찍기</button>
+      <button id="shareBtn">공유</button>
+      <button id="saveBtn">저장</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" role="status"></div>
+<div id="screenFlash"></div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
