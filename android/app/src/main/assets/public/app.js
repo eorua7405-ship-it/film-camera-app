@@ -61,7 +61,6 @@ document.querySelector("#editScreen .seg").addEventListener("click", (e) => {
 });
 
 /* ===== 촬영 화면 컨트롤 ===== */
-$("tgContour").addEventListener("click", (e) => { contourOn = !contourOn; e.target.classList.toggle("on", contourOn); });
 $("filmPresets").addEventListener("click", (e) => {
   const btn = e.target.closest(".pill");
   if (!btn) return;
@@ -342,7 +341,7 @@ void main() {
     vec3 far = vec3(0.0);
     for (int i = 0; i < 8; i++) {
       float fa = 0.7853982 * float(i);
-      far += texture2D(uFrame, uv + vec2(cos(fa), sin(fa)) * uRadius * 2.7 * uTexel).rgb;
+      far += texture2D(uFrame, uv + vec2(cos(fa), sin(fa)) * uRadius * 2.0 * uTexel).rgb;
     }
     far /= 8.0;
 
@@ -356,32 +355,40 @@ void main() {
     float dRed = redC - redA;                            // 주변보다 붉은 정도
     float score = max(darker, dRed * 0.9);
 
-    float th = 0.042 - 0.020 * uBlemish;
-    float spot = smoothstep(th * 0.45, th, score);
+    float th = 0.050 - 0.016 * uBlemish;
+    float spot = smoothstep(th * 0.5, th, score);
+    // 국소성 검사: 잡티는 바로 옆 피부보다도 어둡다.
+    // 얼굴 굴곡·조명 같은 넓은 명암 변화는 c와 주변 평균이 거의 같아 자동 제외된다.
+    float local = dot(avg, lw) - lumC;
+    spot *= smoothstep(0.006, 0.028, local);
 
     // ── 남겨야 할 특징 보호 (점·눈썹·입술 경계·머리카락) ──
     spot *= 1.0 - smoothstep(0.26, 0.42, darker);        // 아주 진한 점(Mole)만 보존
     spot *= smoothstep(0.12, 0.28, c.g);                 // 원래 매우 어두운 영역 보호
     spot *= 1.0 - 0.4 * smoothstep(0.68, 0.88, lumA);    // 하이라이트는 약하게
-    spot *= 1.0 * uBlemish;
+    spot *= 0.9 * uBlemish;
 
     // 밝은 반점(모공 반짝임)도 대칭으로 정리
     float glare = smoothstep(th * 0.45, th, -darker) * 0.55 * uBlemish;
 
-    // ── 2단계: 질감 이식 인페인팅 ──
-    // 잡티 자리를 평평하게 덮지 않고, 근처 '깨끗한 피부'의 결을 가져와 새로 그린다
-    vec2 donorOff = vec2(uRadius * 2.3, uRadius * 1.1) * uTexel;
-    vec3 dC = texture2D(uFrame, uv + donorOff).rgb;
-    vec3 dA = (texture2D(uFrame, uv + donorOff + vec2(uRadius, 0.0) * uTexel).rgb
-             + texture2D(uFrame, uv + donorOff - vec2(uRadius, 0.0) * uTexel).rgb
-             + texture2D(uFrame, uv + donorOff + vec2(0.0, uRadius) * uTexel).rgb
-             + texture2D(uFrame, uv + donorOff - vec2(0.0, uRadius) * uTexel).rgb) * 0.25;
-    vec3 donorTex = dC - dA;                             // 이식할 피부 결 (고주파)
+    // ── 2단계: 질감 재합성 ──
+    // 한 곳에서 통째로 베껴오면 그 부분이 겹쳐 보이므로(유령 현상),
+    // 가까운 4방향의 '결 성분'만 뽑아 평균낸다. 방향성 구조는 상쇄되고 질감만 남는다.
+    vec3 donorTex = vec3(0.0);
+    for (int i = 0; i < 4; i++) {
+      float da = 1.5707963 * float(i);
+      vec2 dOff = vec2(cos(da), sin(da)) * uRadius * 1.1 * uTexel;
+      vec3 dC = texture2D(uFrame, uv + dOff).rgb;
+      vec3 dB = (texture2D(uFrame, uv + dOff + vec2(uRadius, 0.0) * 0.5 * uTexel).rgb
+               + texture2D(uFrame, uv + dOff - vec2(uRadius, 0.0) * 0.5 * uTexel).rgb) * 0.5;
+      donorTex += (dC - dB);
+    }
+    donorTex *= 0.25;
 
     // ── 3단계: 마이크로 톤 조정 + 블렌딩 ──
     // 주변의 정상 혈색/톤(저주파) + 이식한 질감(고주파) → 경계 없는 융합
-    float fix = max(spot, glare);
-    vec3 inpaint = far + donorTex * 0.85;
+    float fix = min(0.9, max(spot, glare));
+    vec3 inpaint = far + donorTex * 0.7;
     vec3 r = mix(c, inpaint, fix);
 
     // 주파수 분리 스무딩: 톤 층만 정리, 결은 강도에 비례해 보존
@@ -395,36 +402,41 @@ void main() {
   }
 
 
-  // ===== 팔자주름 완화: 후보 영역 안에서 '실제 골'을 감지해 적용 =====
-  // 랜드마크는 탐색 영역만 정하고, 픽셀 분석으로 진짜 주름을 찾는다.
-  // 주름 = 예상 방향의 수직 양옆보다 어두운 홈. 골이 아닌 곳은 건드리지 않으므로
-  // 사람마다 주름 위치가 달라도 자동 적응하고, 입꼬리가 밝아지는 오류도 원천 차단.
+  // ===== 주름 완화: 그림자 밝히기 + 선 재합성 + 볼륨 리라이팅 =====
   if (uWrinkle > 0.01) {
     float wl = foldW(vUV, uFoldL, uFoldRad, uAspect);
     float wr2 = foldW(vUV, uFoldR, uFoldRad, uAspect);
-    float fw = max(wl, wr2) * uWrinkle;
-    if (fw > 0.01) {
+    float fw = max(wl, wr2);
+    if (fw > 0.005) {
       vec4 seg = wl > wr2 ? uFoldL : uFoldR;
       vec2 fdir = seg.zw - seg.xy; fdir.y *= uAspect;
       fdir = normalize(fdir);
-      vec2 perp = vec2(-fdir.y, fdir.x); perp.y /= uAspect;   // 주름 방향의 수직
-      float pd = uFoldRad * 0.55;
-      vec3 lwF = vec3(0.299, 0.587, 0.114);
-      float lc = dot(res, lwF);
-      float n1 = dot(texture2D(uFrame, uv + perp * pd).rgb, lwF);
-      float n2 = dot(texture2D(uFrame, uv - perp * pd).rgb, lwF);
-      float target = (n1 + n2) * 0.5;                             // 양옆 피부의 평균 밝기
-      // 골 게이트: 양옆보다 실제로 어두운 곳만 (얕은 골도 감지되도록 문턱 낮춤)
-      float gate = smoothstep(0.012, 0.05, target - lc);
-      // 선형성: 주름은 '선'이라 진행 방향으로도 어둡고, 잡티는 '점'이라 끊긴다
+      vec2 perp = vec2(-fdir.y, fdir.x); perp.y /= uAspect;
       vec2 fuv = vec2(fdir.x, fdir.y / uAspect);
-      float a1 = dot(texture2D(uFrame, uv + fuv * pd).rgb, lwF);
-      float a2 = dot(texture2D(uFrame, uv - fuv * pd).rgb, lwF);
-      float lineness = 1.0 - clamp((min(a1, a2) - lc) * 12.0, 0.0, 1.0);
-      // '골 깊이의 절반을 메움': 얕든 깊든 항상 깊이에 비례해 uWrinkle(50%)만큼 채워짐
-      float ratio = min(target / max(lc, 0.02), 1.6);
-      float fillAmt = min(1.0, max(wl, wr2) * 1.3) * gate * lineness * uWrinkle;
-      res *= 1.0 + (ratio - 1.0) * fillAmt;
+      float pd = uFoldRad * 0.40;
+      vec3 lwW = vec3(0.299, 0.587, 0.114);
+
+      vec3 p1 = texture2D(uFrame, uv + perp * pd).rgb;   // 주름 양옆(정상 피부)
+      vec3 p2 = texture2D(uFrame, uv - perp * pd).rgb;
+      vec3 across = (p1 + p2) * 0.5;
+      float lc = dot(res, lwW), la = dot(across, lwW);
+      float diff = la - lc;                              // + 골짜기 / - 튀어나온 능선
+
+      // 선형성 검사: 주름은 '선', 잡티·점은 제외
+      float a1 = dot(texture2D(uFrame, uv + fuv * pd).rgb, lwW);
+      float a2 = dot(texture2D(uFrame, uv - fuv * pd).rgb, lwW);
+      float lineness = 1.0 - clamp((min(a1, a2) - lc) * 10.0, 0.0, 1.0);
+      float amt = uWrinkle * fw * lineness;
+
+      // (1) 그림자 밝히기 & 능선 누르기 — 명암 격차를 줄여 시각적으로 평탄화
+      float k = clamp(diff / max(lc, 0.02), -0.35, 0.55);
+      res *= 1.0 + k * amt * 0.8;
+
+      // (2) 디테일 층의 선 완화 — 지우지 않고 깊이를 20~30% 수준으로 재합성
+      res = mix(res, across, amt * 0.7);
+
+      // (3) 볼륨 리라이팅 — 푹 꺼진 부위 전체에 은은한 조명을 더해 입체를 채움
+      res *= 1.0 + fw * uWrinkle * 0.035;
     }
   }
 
