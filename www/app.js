@@ -334,6 +334,7 @@ void main() {
   if (skinM > 0.01 && (uSmooth > 0.01 || uBlemish > 0.01)) {
     float sigmaR = 0.07 + 0.07 * uSmooth;
     vec3 wsum = c; float wtot = 1.0; vec3 plain = c;
+    float minI = 1.0;
     for (int i = 0; i < 8; i++) {
       float ang = 0.7853982 * float(i);
       vec2 dir = vec2(cos(ang), sin(ang));
@@ -343,6 +344,7 @@ void main() {
       float w2 = exp(-dot(s2 - c, s2 - c) / (2.0 * sigmaR * sigmaR));
       wsum += s1 * w1 + s2 * w2; wtot += w1 + w2;
       plain += s1 + s2;
+      minI = min(minI, min(lumOf(s1), lumOf(s2)));
     }
     vec3 base = wsum / wtot;          // 엣지 보존 스무딩 (Bilateral)
     vec3 avg = plain / 17.0;          // 국소 평균
@@ -375,6 +377,8 @@ void main() {
       spot *= smoothstep(0.008, 0.030, lumA - lumC);       // 국소성 (보조 게이트)
       spot *= 1.0 - smoothstep(0.26, 0.42, lumF - lumC);   // 진한 점(Mole) 보존
       spot *= smoothstep(0.12, 0.28, c.g);                 // 극암부(머리카락 등) 보호
+      spot *= smoothstep(0.10, 0.22, minI);                // 검은 구멍 인접(콧구멍 테두리) 보호
+      spot *= 1.0 - smoothstep(0.20, 0.30, pit);           // 너무 깊은 함몰은 구멍이지 잡티가 아님
       float glare = smoothstep(th * 0.5, th, lumC - maxF) * 0.55 * uBlemish;   // 사방보다 밝은 반점만
       spot = min(spot * 0.9 * uBlemish, 0.9);
 
@@ -736,12 +740,15 @@ function captureHighRes() {
 // 위치 추정에 의존하지 않으므로 사람·표정이 달라도 작동한다.
 function foldCapsules(L) {
   const faceW = Math.abs(L[454].x - L[234].x);
+  // 팔자 주름은 콧볼 옆에서 시작해 입꼬리 '바깥'으로 흐른다.
+  // 인중(코 바로 밑)을 침범하지 않도록 시작점을 옆으로 충분히 밀고 반경을 줄인다.
   const mk = (corner) => {
-    const top = [L[2].x + (corner.x - L[2].x) * 0.55, L[2].y + (corner.y - L[2].y) * 0.05];
-    const bot = [corner.x + (corner.x - L[13].x) * 0.55, corner.y + (corner.y - L[2].y) * 0.10];
+    const dx = corner.x - L[2].x;
+    const top = [L[2].x + dx * 0.90, L[2].y + (corner.y - L[2].y) * 0.22];
+    const bot = [corner.x + dx * 0.55, corner.y + (corner.y - L[2].y) * 0.20];
     return [top[0], 1 - top[1], bot[0], 1 - bot[1]];
   };
-  return { l: mk(L[61]), r: mk(L[291]), rad: faceW * 0.085 };
+  return { l: mk(L[61]), r: mk(L[291]), rad: faceW * 0.062 };
 }
 
 let editFold = null;
@@ -1073,6 +1080,13 @@ function buildFaceMask(w, h, L) {
   carveEllipse(L[105], L[105], faceW * 0.16, faceW * 0.045, w, h);
   carveEllipse(L[334], L[334], faceW * 0.16, faceW * 0.045, w, h);
   carveEllipse(L[13],  L[14],  faceW * 0.22, faceW * 0.11, w, h);
+  // 콧구멍: '사방보다 어두운 함몰'의 대표 사례라 잡티 탐지가 오인하기 쉬움 → 원천 제외
+  for (const corner of [L[61], L[291]]) {
+    const nx = L[2].x + (corner.x - L[2].x) * 0.30;
+    const ny = L[2].y + (L[1].y - L[2].y) * 0.30;
+    const p = { x: nx, y: ny };
+    carveEllipse(p, p, faceW * 0.065, faceW * 0.050, w, h);
+  }
   maskCtx.restore();
 
   // 눈 흰자 → G 채널 (눈 보정 전용 영역)
