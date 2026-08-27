@@ -23,7 +23,7 @@ let facing = "user";
 let useFlash = true;
 let focal = 28, hwZoom = false;
 let ssChoice = "auto";
-let skinOn = true, blemishOn = true, contourOn = true, filmOn = true;
+let skinOn = true, blemishOn = true, contourOn = true, filmOn = true, eyeOn = true;
 let filmPreset = 0, filmStrength = 0.6;
 let skinAmt = 0.6, blemAmt = 0.6;   // 피부결·잡티 세기 (슬라이더 100 = 최대 강도)
 let mode = "cam";   // cam | edit
@@ -110,6 +110,11 @@ $("skinSeg").addEventListener("click", (e) => {
   b.classList.add("on");
   skinAmt = Number(b.dataset.skin) / 100;
   skinOn = skinAmt > 0;
+});
+$("tgEye").addEventListener("click", (e) => {
+  eyeOn = !eyeOn;
+  e.target.classList.toggle("on", eyeOn);
+  e.target.textContent = eyeOn ? "켜짐" : "꺼짐";
 });
 $("tgContour").addEventListener("click", (e) => {
   contourOn = !contourOn;
@@ -258,224 +263,234 @@ precision highp float;
 precision mediump float;
 #endif
 varying vec2 vUV;
-uniform sampler2D uFrame;
-uniform sampler2D uMask;
-uniform vec2  uTexel;      // 소스 1픽셀 크기
-uniform float uAspect;     // 세로/가로 비율
-uniform float uRadius;
-uniform float uSmooth;
-uniform float uBlemish;
-uniform float uFilm;
+
+uniform sampler2D uFrame;   // 원본 프레임
+uniform sampler2D uMask;    // A=피부, G=눈 흰자
+uniform sampler2D uWarp;    // 윤곽 변위 맵 (RG 인코딩)
+uniform vec2  uTexel;
+uniform float uAspect;
+uniform float uRadius;      // 보정 반경 (px)
+uniform float uSmooth;      // 피부결
+uniform float uBlemish;     // 잡티
+uniform float uEye;         // 눈 보정
+uniform float uWrinkle;     // 주름 완화
+uniform vec4  uFoldL;       // 팔자 후보 캡슐 (좌)
+uniform vec4  uFoldR;       // 팔자 후보 캡슐 (우)
+uniform float uFoldRad;
+uniform float uWarpAmt;
+uniform float uLens;
 uniform float uSharp;
 uniform float uContrast;
 uniform float uSat;
 uniform vec3  uRGB;
 uniform float uWB;
+uniform float uFilm;
 uniform float uTime;
-uniform vec2  uFmTone;     // 필름 톤커브 (스케일, 리프트)
-uniform float uFmSat;      // 필름 채도 감쇄
-uniform vec3  uFmHi;       // 하이라이트 틴트
-uniform vec3  uFmSh;       // 섀도 틴트
-uniform float uFmGrain;    // 그레인 세기
-uniform float uFmVig;      // 비네트 세기
-uniform float uLens;       // 화각별 렌즈 왜곡 (28mm 배럴 ~ 50mm 평탄)
-uniform sampler2D uWarp;   // 윤곽 변위 맵 (실루엣 평탄화 벡터, RG 인코딩)
-uniform float uWarpAmt;    // 윤곽 보정 on/off
-uniform float uWrinkle;    // 팔자주름 완화 강도 (0.5 = 주름을 원래의 50%로)
-uniform vec4  uFoldL;      // 왼쪽 팔자 라인 (시작점.xy, 끝점.zw)
-uniform vec4  uFoldR;      // 오른쪽 팔자 라인
-uniform float uFoldRad;    // 팔자 캡슐 반경
+uniform vec2  uFmTone;      // 필름 (스케일, 리프트)
+uniform float uFmSat;
+uniform vec3  uFmHi;
+uniform vec3  uFmSh;
+uniform float uFmGrain;
+uniform float uFmVig;
 
-// 선분(팔자 라인) 주변 캡슐 가중치: 라인에 가까울수록 1
+float lumOf(vec3 v) { return dot(v, vec3(0.299, 0.587, 0.114)); }
+
+// 팔자 후보 캡슐 가중치 (선분 거리 + 입꼬리 방향 테이퍼)
 float foldW(vec2 p, vec4 seg, float rad, float aspect) {
   vec2 pa = p - seg.xy, ba = seg.zw - seg.xy;
   pa.y *= aspect; ba.y *= aspect;
   float t = clamp(dot(pa, ba) / max(dot(ba, ba), 0.000001), 0.0, 1.0);
   vec2 d = pa - ba * t;
   float w = 1.0 - smoothstep(rad * 0.25, rad, length(d));
-  w *= 1.0 - smoothstep(0.55, 0.95, t);  // 입꼬리 방향으로 갈수록 일찍 소멸 ('조커' 방지)
+  w *= 1.0 - smoothstep(0.55, 0.95, t);
   return w;
 }
 
 void main() {
   vec2 uv = vUV;
 
-  // ===== 윤곽 보정: 실루엣의 튀어나온 부분(광대 모서리·각진 턱)을 평탄화 =====
-  // JS에서 계산한 변위 맵을 샘플. 튀어나온 지점만 매끈한 기준선 쪽으로 당겨진다.
+  // ===== 윤곽: 실루엣 평탄화 (변위 맵) =====
   if (uWarpAmt > 0.5) {
     vec2 wv = texture2D(uWarp, vUV).rg;
     uv -= (wv - vec2(128.0 / 255.0)) * 0.08;
   }
 
-  // ===== 화각 렌즈 느낌: 28mm 배럴 왜곡(가장자리 볼록) ~ 50mm 평탄 =====
+  // ===== 화각 렌즈 왜곡 =====
   if (abs(uLens) > 0.001) {
-    vec2 cc = uv - 0.5; cc.y *= uAspect;
-    float r2 = dot(cc, cc);
-    vec2 cd = cc * (1.0 + uLens * r2);
-    cd.y /= uAspect;
-    uv = 0.5 + cd;
+    vec2 d2 = uv - 0.5; d2.y *= uAspect;
+    float r2 = dot(d2, d2);
+    uv = vec2(0.5) + (d2 * (1.0 + uLens * r2)) / vec2(1.0, uAspect);
   }
 
   vec3 c = texture2D(uFrame, uv).rgb;
   vec3 res = c;
-  float m = texture2D(uMask, uv).a;
+  vec4 mk = texture2D(uMask, uv);
+  float skinM = mk.a * (1.0 - mk.g);   // 피부 (눈 영역 제외)
 
-  // ===== 피부 보정 (얼굴 마스크 안에서만) =====
-  if (m > 0.01 && (uSmooth > 0.01 || uBlemish > 0.01)) {
+  // ===== 피부: 잡티(조명 결함 보정) + 피부결(주파수 분리) =====
+  // 잡티 설계 원칙: 다른 위치의 픽셀을 '복사'하지 않는다.
+  // 잡티를 조명 결함으로 보고(레티넥스), 주변과의 저주파 차이만 더한다.
+  // 픽셀 이동이 없으므로 구조물이 겹쳐 보이는 현상이 원천적으로 불가능하다.
+  if (skinM > 0.01 && (uSmooth > 0.01 || uBlemish > 0.01)) {
     float sigmaR = 0.07 + 0.07 * uSmooth;
-    vec3 sum = c; float wsum = 1.0; vec3 plain = c;
-    for (int i = 0; i < 16; i++) {
-      float ang = 0.3926991 * float(i);
-      float ring = (mod(float(i), 2.0) < 1.0) ? 1.0 : 0.55;
-      vec2 off = vec2(cos(ang), sin(ang)) * uRadius * ring * uTexel;
-      vec3 s = texture2D(uFrame, uv + off).rgb;
-      float d = length(s - c);
-      float wr = exp(-(d * d) / (2.0 * sigmaR * sigmaR));
-      sum += s * wr; wsum += wr; plain += s;
+    vec3 wsum = c; float wtot = 1.0; vec3 plain = c;
+    for (int i = 0; i < 8; i++) {
+      float ang = 0.7853982 * float(i);
+      vec2 dir = vec2(cos(ang), sin(ang));
+      vec3 s1 = texture2D(uFrame, uv + dir * uRadius * uTexel).rgb;
+      vec3 s2 = texture2D(uFrame, uv + dir * uRadius * 0.55 * uTexel).rgb;
+      float w1 = exp(-dot(s1 - c, s1 - c) / (2.0 * sigmaR * sigmaR));
+      float w2 = exp(-dot(s2 - c, s2 - c) / (2.0 * sigmaR * sigmaR));
+      wsum += s1 * w1 + s2 * w2; wtot += w1 + w2;
+      plain += s1 + s2;
     }
-    vec3 base = sum / wsum;
-    vec3 avg = plain / 17.0;
-    vec3 hi = c - base;
-
-    // 넓은 반경의 '깨끗한 피부' 기준값 — 잡티가 커도 오염되지 않도록 바깥에서 샘플
-    vec3 far = vec3(0.0);
+    vec3 base = wsum / wtot;          // 엣지 보존 스무딩 (Bilateral)
+    vec3 avg = plain / 17.0;          // 국소 평균
+    vec3 farC = vec3(0.0);            // 잡티 밖 '깨끗한 피부' 기준
+    float minF = 1.0, maxF = 0.0, maxRedF = -1.0;
     for (int i = 0; i < 8; i++) {
       float fa = 0.7853982 * float(i);
-      far += texture2D(uFrame, uv + vec2(cos(fa), sin(fa)) * uRadius * 2.0 * uTexel).rgb;
+      vec3 fs2 = texture2D(uFrame, uv + vec2(cos(fa), sin(fa)) * uRadius * 2.0 * uTexel).rgb;
+      farC += fs2;
+      float lf = lumOf(fs2);
+      minF = min(minF, lf); maxF = max(maxF, lf);
+      maxRedF = max(maxRedF, fs2.r - (fs2.g + fs2.b) * 0.5);
     }
-    far /= 8.0;
+    farC *= 0.125;
 
-    // ── 1단계: 이상 탐지 (Anomaly Detection) ──
-    // 밝기 이상(그림자·흉터)과 색 이상(붉은기·색소침착)을 함께 본다
-    vec3 lw = vec3(0.299, 0.587, 0.114);
-    float lumC = dot(c, lw), lumA = dot(far, lw);
-    float darker = lumA - lumC;                          // 주변보다 어두운 정도
-    float redC = c.r - (c.g + c.b) * 0.5;
-    float redA = far.r - (far.g + far.b) * 0.5;
-    float dRed = redC - redA;                            // 주변보다 붉은 정도
-    float score = max(darker, dRed * 0.9);
+    float lumC = lumOf(c), lumA = lumOf(avg), lumF = lumOf(farC);
+    vec3 r = c;
 
-    float th = 0.050 - 0.016 * uBlemish;
-    float spot = smoothstep(th * 0.5, th, score);
-    // 국소성 검사: 잡티는 바로 옆 피부보다도 어둡다.
-    // 얼굴 굴곡·조명 같은 넓은 명암 변화는 c와 주변 평균이 거의 같아 자동 제외된다.
-    float local = dot(avg, lw) - lumC;
-    spot *= smoothstep(0.006, 0.028, local);
+    if (uBlemish > 0.01) {
+      // 이상 탐지: 밝기 결함 + 붉은기 결함
+      float redC = c.r - (c.g + c.b) * 0.5;
+      float redF = farC.r - (farC.g + farC.b) * 0.5;
+      // 잡티 = '함몰': 사방 어느 방향으로 가도 밝아진다.
+      // 음영 그라데이션은 한쪽이 어두우므로 minF 기준을 절대 통과할 수 없다.
+      float pit = minF - lumC;                             // 가장 어두운 방향조차 나보다 밝음
+      float redPit = redC - maxRedF;                       // 가장 붉은 방향조차 나보다 덜 붉음
+      float th = 0.045 - 0.014 * uBlemish;
+      float spot = max(smoothstep(th * 0.5, th, pit),
+                       smoothstep(th * 0.6, th * 1.2, redPit) * 0.85);
+      spot *= smoothstep(0.008, 0.030, lumA - lumC);       // 국소성 (보조 게이트)
+      spot *= 1.0 - smoothstep(0.26, 0.42, lumF - lumC);   // 진한 점(Mole) 보존
+      spot *= smoothstep(0.12, 0.28, c.g);                 // 극암부(머리카락 등) 보호
+      float glare = smoothstep(th * 0.5, th, lumC - maxF) * 0.55 * uBlemish;   // 사방보다 밝은 반점만
+      spot = min(spot * 0.9 * uBlemish, 0.9);
 
-    // ── 남겨야 할 특징 보호 (점·눈썹·입술 경계·머리카락) ──
-    spot *= 1.0 - smoothstep(0.26, 0.42, darker);        // 아주 진한 점(Mole)만 보존
-    spot *= smoothstep(0.12, 0.28, c.g);                 // 원래 매우 어두운 영역 보호
-    spot *= 1.0 - 0.4 * smoothstep(0.68, 0.88, lumA);    // 하이라이트는 약하게
-    spot *= 0.9 * uBlemish;
-
-    // 밝은 반점(모공 반짝임)도 대칭으로 정리
-    float glare = smoothstep(th * 0.45, th, -darker) * 0.55 * uBlemish;
-
-    // ── 2단계: 질감 재합성 ──
-    // 한 곳에서 통째로 베껴오면 그 부분이 겹쳐 보이므로(유령 현상),
-    // 가까운 4방향의 '결 성분'만 뽑아 평균낸다. 방향성 구조는 상쇄되고 질감만 남는다.
-    vec3 donorTex = vec3(0.0);
-    for (int i = 0; i < 4; i++) {
-      float da = 1.5707963 * float(i);
-      vec2 dOff = vec2(cos(da), sin(da)) * uRadius * 1.1 * uTexel;
-      vec3 dC = texture2D(uFrame, uv + dOff).rgb;
-      vec3 dB = (texture2D(uFrame, uv + dOff + vec2(uRadius, 0.0) * 0.5 * uTexel).rgb
-               + texture2D(uFrame, uv + dOff - vec2(uRadius, 0.0) * 0.5 * uTexel).rgb) * 0.5;
-      donorTex += (dC - dB);
+      // 조명 결함 복구: 밝기 '배율'만 조정 (Dodge/Burn) — 색·질감 불변, 상한 존재.
+      // 덧셈이 아닌 제한된 곱셈이라 주변 구조물이 섞여 들어올 수 없다.
+      float liftL = clamp(lumF - lumC, 0.0, 0.12);         // 결함 깊이 (상한)
+      float dodge = min(1.0 + (liftL / max(lumC, 0.05)) * spot, 1.35);
+      float dropL = clamp(lumC - lumF, 0.0, 0.10);
+      float burn = max(1.0 - (dropL / max(lumC, 0.05)) * glare, 0.78);
+      r = c * dodge * burn;
+      // 붉은기 결함은 별도로 소폭 중화 (여드름 자국·홍조 점)
+      float redEx = clamp(redC - redF, 0.0, 0.2);
+      r -= vec3(0.66, -0.33, -0.33) * redEx * spot * 0.5;
     }
-    donorTex *= 0.25;
 
-    // ── 3단계: 마이크로 톤 조정 + 블렌딩 ──
-    // 주변의 정상 혈색/톤(저주파) + 이식한 질감(고주파) → 경계 없는 융합
-    float fix = min(0.9, max(spot, glare));
-    vec3 inpaint = far + donorTex * 0.7;
-    vec3 r = mix(c, inpaint, fix);
-
-    // 주파수 분리 스무딩: 톤 층만 정리, 결은 강도에 비례해 보존
-    float dev = abs(darker);
-    float structural = smoothstep(0.035, 0.11, dev);
-    vec3 lowNew = mix(base, avg, uSmooth * 0.75 * (1.0 - structural));
-    vec3 hiKeep = r - base;
-    r = lowNew + hiKeep * (1.0 - uSmooth * 0.45);
-
-    res = mix(c, r, m);
+    if (uSmooth > 0.01) {
+      float dev = abs(lumA - lumC);
+      float structural = smoothstep(0.035, 0.11, dev);     // 음영·윤곽 보호
+      vec3 low = mix(base, avg, uSmooth * 0.75 * (1.0 - structural));
+      vec3 hi = r - base;
+      r = low + hi * (1.0 - uSmooth * 0.45);
+    }
+    res = mix(c, r, skinM);
   }
 
+  // ===== 눈: 흰자 정리 (LAB 원리 — 채도만 낮추고 밝기만 올림) =====
+  if (mk.g > 0.01 && uEye > 0.01) {
+    float l = lumOf(res);
+    float white = smoothstep(0.30, 0.50, l);               // 흰자만 (홍채·속눈썹 제외)
+    float wgt = mk.g * white * uEye;
+    if (wgt > 0.01) {
+      // 핏줄: 주변 대비 국소적으로 붉은 가는 구조
+      float redL = res.r - (res.g + res.b) * 0.5;
+      float redN = 0.0;
+      for (int i = 0; i < 4; i++) {
+        float ea = 1.5707963 * float(i);
+        vec3 s = texture2D(uFrame, uv + vec2(cos(ea), sin(ea)) * uRadius * 0.9 * uTexel).rgb;
+        redN += s.r - (s.g + s.b) * 0.5;
+      }
+      redN *= 0.25;
+      float vessel = clamp((redL - redN) * 8.0, 0.0, 1.0);
+      res = mix(res, vec3(l), wgt * (0.35 + 0.5 * vessel)); // A·B 채널 → 0 (무채색화)
+      res *= 1.0 + wgt * 0.10;                              // L 리프트
+    }
+  }
 
-  // ===== 주름 완화: 그림자 밝히기 + 선 재합성 + 볼륨 리라이팅 =====
+  // ===== 주름: 조명 평탄화 (Dodge & Burn) =====
+  // 설계 원칙: 색 혼합 없음 — 밝기 '배율'만 조정한다 (겹침 불가).
+  // 이웃 샘플이 피부 마스크 밖(입술·눈썹·콧구멍)이면 연산을 차단한다.
   if (uWrinkle > 0.01) {
     float wl = foldW(vUV, uFoldL, uFoldRad, uAspect);
     float wr2 = foldW(vUV, uFoldR, uFoldRad, uAspect);
     float fw = max(wl, wr2);
     if (fw > 0.005) {
       vec4 seg = wl > wr2 ? uFoldL : uFoldR;
-      vec2 fdir = seg.zw - seg.xy; fdir.y *= uAspect;
-      fdir = normalize(fdir);
-      vec2 perp = vec2(-fdir.y, fdir.x); perp.y /= uAspect;
-      vec2 fuv = vec2(fdir.x, fdir.y / uAspect);
-      float pd = uFoldRad * 0.40;
-      vec3 lwW = vec3(0.299, 0.587, 0.114);
-
-      vec3 p1 = texture2D(uFrame, uv + perp * pd).rgb;   // 주름 양옆(정상 피부)
-      vec3 p2 = texture2D(uFrame, uv - perp * pd).rgb;
-      vec3 across = (p1 + p2) * 0.5;
-      float lc = dot(res, lwW), la = dot(across, lwW);
-      float diff = la - lc;                              // + 골짜기 / - 튀어나온 능선
-
-      // 선형성 검사: 주름은 '선', 잡티·점은 제외
-      float a1 = dot(texture2D(uFrame, uv + fuv * pd).rgb, lwW);
-      float a2 = dot(texture2D(uFrame, uv - fuv * pd).rgb, lwW);
-      float lineness = 1.0 - clamp((min(a1, a2) - lc) * 10.0, 0.0, 1.0);
-      float amt = uWrinkle * fw * lineness;
-
-      // (1) 그림자 밝히기 & 능선 누르기 — 명암 격차를 줄여 시각적으로 평탄화
-      float k = clamp(diff / max(lc, 0.02), -0.35, 0.55);
-      res *= 1.0 + k * amt * 0.8;
-
-      // (2) 디테일 층의 선 완화 — 지우지 않고 깊이를 20~30% 수준으로 재합성
-      res = mix(res, across, amt * 0.7);
-
-      // (3) 볼륨 리라이팅 — 푹 꺼진 부위 전체에 은은한 조명을 더해 입체를 채움
-      res *= 1.0 + fw * uWrinkle * 0.035;
+      vec2 fd = seg.zw - seg.xy; fd.y *= uAspect;
+      fd = normalize(fd);
+      vec2 perp = vec2(-fd.y, fd.x); perp.y /= uAspect;
+      vec2 along = vec2(fd.x, fd.y / uAspect);
+      float pd = uFoldRad * 0.35;
+      vec4 m1 = texture2D(uMask, uv + perp * pd);
+      vec4 m2 = texture2D(uMask, uv - perp * pd);
+      float gate = skinM * (m1.a * (1.0 - m1.g)) * (m2.a * (1.0 - m2.g));
+      if (gate > 0.01) {
+        float lc = lumOf(res);
+        float n1 = lumOf(texture2D(uFrame, uv + perp * pd).rgb);
+        float n2 = lumOf(texture2D(uFrame, uv - perp * pd).rgb);
+        float la = (n1 + n2) * 0.5;
+        float a1 = lumOf(texture2D(uFrame, uv + along * pd).rgb);
+        float a2 = lumOf(texture2D(uFrame, uv - along * pd).rgb);
+        float lineness = 1.0 - clamp((min(a1, a2) - lc) * 10.0, 0.0, 1.0);
+        float amt = uWrinkle * fw * lineness * gate;
+        float k = clamp((la - lc) / max(lc, 0.02), -0.30, 0.55);
+        res *= 1.0 + k * amt * 0.85;                       // 골 Dodge / 능선 Burn
+        res *= 1.0 + fw * uWrinkle * gate * 0.035;         // 볼륨 리라이팅
+      }
     }
   }
 
   // ===== 선명도 =====
-  if (uSharp > 0.001) {
-    vec3 nb = texture2D(uFrame, uv + vec2(uTexel.x, 0.0)).rgb
+  if (uSharp > 0.01) {
+    vec3 b = (texture2D(uFrame, uv + vec2(uTexel.x, 0.0)).rgb
             + texture2D(uFrame, uv - vec2(uTexel.x, 0.0)).rgb
             + texture2D(uFrame, uv + vec2(0.0, uTexel.y)).rgb
-            + texture2D(uFrame, uv - vec2(0.0, uTexel.y)).rgb;
-    res += (c - nb * 0.25) * uSharp;
+            + texture2D(uFrame, uv - vec2(0.0, uTexel.y)).rgb) * 0.25;
+    res += (res - b) * uSharp * 0.9;
   }
 
   // ===== 화이트 밸런스 / RGB / 콘트라스트 / 채도 =====
-  res *= vec3(1.0 + 0.09 * uWB, 1.0 + 0.015 * uWB, 1.0 - 0.09 * uWB);
+  if (abs(uWB) > 0.001) {
+    res *= vec3(1.0 + 0.10 * uWB, 1.0 + 0.015 * uWB, 1.0 - 0.12 * uWB);
+  }
   res *= uRGB;
   res = (res - 0.5) * uContrast + 0.5;
-  res = clamp(res, 0.0, 1.0);
-  float sl = dot(res, vec3(0.299, 0.587, 0.114));
-  res = mix(vec3(sl), res, uSat);
+  res = mix(vec3(lumOf(res)), res, uSat);
 
-  // ===== 필름 그레이드: 프리셋 파라미터 기반 (레퍼런스 실측값) =====
+  // ===== 필름 그레이드 (프리셋 파라미터, 레퍼런스 실측값) =====
   if (uFilm > 0.005) {
     vec3 f = res;
-    float fl = dot(f, vec3(0.299, 0.587, 0.114));
-    f = f * mix(1.0, uFmTone.x, uFilm) + vec3(uFmTone.y * uFilm);      // 페이드 톤커브
-    f = mix(f, vec3(dot(f, vec3(0.299, 0.587, 0.114))), uFmSat * uFilm); // 채도
+    float fl = lumOf(f);
+    f = f * mix(1.0, uFmTone.x, uFilm) + vec3(uFmTone.y * uFilm);
+    f = mix(f, vec3(lumOf(f)), uFmSat * uFilm);
     float hl = smoothstep(0.55, 0.9, fl);
-    f *= mix(vec3(1.0), uFmHi, hl * uFilm);                             // 하이라이트 틴트
+    f *= mix(vec3(1.0), uFmHi, hl * uFilm);
     float shd = 1.0 - smoothstep(0.1, 0.45, fl);
-    f *= mix(vec3(1.0), uFmSh, shd * uFilm);                            // 섀도 틴트
+    f *= mix(vec3(1.0), uFmSh, shd * uFilm);
     vec2 dv = vUV - 0.5;
-    f *= 1.0 - dot(dv, dv) * uFmVig * uFilm;                            // 비네트
+    f *= 1.0 - dot(dv, dv) * uFmVig * uFilm;
     float g = fract(sin(dot(gl_FragCoord.xy + vec2(uTime * 617.0), vec2(12.9898, 78.233))) * 43758.5453) - 0.5;
-    f += g * uFmGrain * uFilm;                                          // 그레인
+    f += g * uFmGrain * uFilm;
     res = f;
   }
 
   gl_FragColor = vec4(clamp(res, 0.0, 1.0), 1.0);
-}`;
+}
+`;
 
 function initGLOnce() {
   if (glReady || !gl) return glReady;
@@ -515,10 +530,9 @@ function initGLOnce() {
     return t;
   };
   mkTex(0); mkTex(1); mkTex(2);
-  ["uFrame","uMask","uTexel","uAspect","uRadius","uSmooth","uBlemish","uFilm","uSharp",
-   "uContrast","uSat","uRGB","uWB","uTime","uLens",
-   "uWarp","uWarpAmt","uWrinkle","uFoldL","uFoldR","uFoldRad",
-   "uFmTone","uFmSat","uFmHi","uFmSh","uFmGrain","uFmVig"]
+  ["uFrame","uMask","uWarp","uTexel","uAspect","uRadius","uSmooth","uBlemish","uEye",
+   "uWrinkle","uFoldL","uFoldR","uFoldRad","uWarpAmt","uLens","uSharp","uContrast",
+   "uSat","uRGB","uWB","uFilm","uTime","uFmTone","uFmSat","uFmHi","uFmSh","uFmGrain","uFmVig"]
     .forEach(n => uLoc[n] = gl.getUniformLocation(prog, n));
   gl.uniform1i(uLoc.uFrame, 0);
   gl.uniform1i(uLoc.uMask, 1);
@@ -567,6 +581,7 @@ function drawGL(srcTex, opt) {
   gl.uniform1f(uLoc.uLens, opt.lens ?? 0);
   gl.uniform1f(uLoc.uWarpAmt, opt.warp ? 1 : 0);
   gl.uniform1f(uLoc.uWrinkle, opt.fold ? (opt.wrinkle ?? 0) : 0);
+  gl.uniform1f(uLoc.uEye, opt.eye ?? 0);
   if (opt.fold) {
     gl.uniform4f(uLoc.uFoldL, opt.fold.l[0], opt.fold.l[1], opt.fold.l[2], opt.fold.l[3]);
     gl.uniform4f(uLoc.uFoldR, opt.fold.r[0], opt.fold.r[1], opt.fold.r[2], opt.fold.r[3]);
@@ -669,6 +684,7 @@ function camPreviewFrame() {
     radius: Math.max(2.5, faceW * 0.030),
     smooth: (skinOn && lastLandmarks) ? skinAmt : 0,
     blemish: (blemishOn && lastLandmarks) ? blemAmt : 0,
+    eye: (eyeOn && lastLandmarks) ? 0.55 : 0,
     film: filmOn ? filmStrength : 0,
     fm: FILM_PRESETS[filmPreset],
     wb: wbCam,
@@ -690,6 +706,7 @@ function captureHighRes() {
     radius: Math.max(2.5, faceW * 0.030),
     smooth: (skinOn && lastLandmarks) ? skinAmt : 0,
     blemish: (blemishOn && lastLandmarks) ? blemAmt : 0,
+    eye: (eyeOn && lastLandmarks) ? 0.55 : 0,
     lens: LENS_MAP[focal],
     warp: contourOn && !!lastLandmarks,
     film: filmOn ? filmStrength : 0,               // 필름 프리셋을 사진에 직접 굽기
@@ -724,7 +741,7 @@ function foldCapsules(L) {
     const bot = [corner.x + (corner.x - L[13].x) * 0.55, corner.y + (corner.y - L[2].y) * 0.10];
     return [top[0], 1 - top[1], bot[0], 1 - bot[1]];
   };
-  return { l: mk(L[61]), r: mk(L[291]), rad: faceW * 0.11 };
+  return { l: mk(L[61]), r: mk(L[291]), rad: faceW * 0.085 };
 }
 
 let editFold = null;
@@ -757,7 +774,17 @@ function enterEdit() {
     EL = r.faceLandmarks?.[0] ?? null;
   } catch (e) { EL = null; }
   if (!EL) EL = landmarksForCapture();
-  if (EL) { try { editFold = foldCapsules(EL); } catch (e) { editFold = null; } }
+  if (EL) {
+    try {
+      editFold = foldCapsules(EL);
+      // 찍힌 사진 기준의 마스크로 교체 (주름의 입술·눈썹 차단 게이트가 이 마스크를 씀)
+      maskCanvas.width = Math.max(2, Math.round(capCanvas.width / 5));
+      maskCanvas.height = Math.max(2, Math.round(capCanvas.height / 5));
+      buildFaceMask(maskCanvas.width, maskCanvas.height, EL);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, maskCanvas);
+    } catch (e) { editFold = null; }
+  }
   const wr = $("wrinkle").closest(".row");
   if (wr) wr.style.opacity = editFold ? "1" : "0.4";
   if (!editFold) showToast("얼굴을 찾지 못해 주름 완화를 쓸 수 없어요");
@@ -784,6 +811,11 @@ function editRender() {
 }
 
 $("retakeBtn").addEventListener("click", () => {
+  if (video.videoWidth) {
+    maskCanvas.width = warpCanvas.width;
+    maskCanvas.height = warpCanvas.height;
+    maskDirty = true;
+  }
   mode = "cam";
   $("editScreen").classList.remove("on");
   $("camScreen").classList.add("on");
@@ -987,7 +1019,7 @@ function loop(ts) {
 /* ===== 얼굴 마스크 ===== */
 function buildFaceMaskIfNeeded() {
   if (!maskDirty || !lastLandmarks) return;
-  buildFaceMask(maskCanvas.width, maskCanvas.height);
+  buildFaceMask(maskCanvas.width, maskCanvas.height, lastLandmarks);
   gl.activeTexture(gl.TEXTURE1);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, maskCanvas);
   if (contourOn) {
@@ -998,12 +1030,16 @@ function buildFaceMaskIfNeeded() {
   maskDirty = false;
 }
 
-function buildFaceMask(w, h) {
+// 눈 흰자 폴리곤 (MediaPipe 눈 컨투어)
+const EYE_L = [263,249,390,373,374,380,381,382,362,398,384,385,386,387,388,466];
+const EYE_R = [33,7,163,144,145,153,154,155,133,173,157,158,159,160,161,246];
+
+// 마스크 채널 설계: A(+R)=피부 영역, G=눈 흰자 영역
+function buildFaceMask(w, h, L) {
   maskCtx.clearRect(0, 0, w, h);
-  const L = lastLandmarks;
   maskCtx.save();
   maskCtx.filter = "blur(" + w * 0.015 + "px)";
-  maskCtx.fillStyle = "#fff";
+  maskCtx.fillStyle = "rgb(255,0,0)";
   maskCtx.beginPath();
   FACE_OVAL.forEach((idx, i) => {
     const p = L[idx];
@@ -1021,12 +1057,13 @@ function buildFaceMask(w, h) {
   const nAng = Math.atan2(ndy, ndx) - Math.PI / 2;
   maskCtx.save();
   maskCtx.filter = "blur(" + w * 0.01 + "px)";
-  maskCtx.fillStyle = "#fff";
+  maskCtx.fillStyle = "rgb(255,0,0)";
   maskCtx.beginPath();
   maskCtx.ellipse(ncx, ncy, faceW * 0.14, nLen * 0.8, nAng, 0, Math.PI * 2);
   maskCtx.fill();
   maskCtx.restore();
 
+  // 눈·눈썹·입 제외
   maskCtx.save();
   maskCtx.globalCompositeOperation = "destination-out";
   maskCtx.filter = "blur(" + faceW * 0.02 + "px)";
@@ -1036,6 +1073,21 @@ function buildFaceMask(w, h) {
   carveEllipse(L[105], L[105], faceW * 0.16, faceW * 0.045, w, h);
   carveEllipse(L[334], L[334], faceW * 0.16, faceW * 0.045, w, h);
   carveEllipse(L[13],  L[14],  faceW * 0.22, faceW * 0.11, w, h);
+  maskCtx.restore();
+
+  // 눈 흰자 → G 채널 (눈 보정 전용 영역)
+  maskCtx.save();
+  maskCtx.filter = "blur(" + w * 0.006 + "px)";
+  maskCtx.fillStyle = "rgb(0,255,0)";
+  for (const ring of [EYE_L, EYE_R]) {
+    maskCtx.beginPath();
+    ring.forEach((idx, i) => {
+      const p = L[idx];
+      i === 0 ? maskCtx.moveTo(p.x * w, p.y * h) : maskCtx.lineTo(p.x * w, p.y * h);
+    });
+    maskCtx.closePath();
+    maskCtx.fill();
+  }
   maskCtx.restore();
 }
 
