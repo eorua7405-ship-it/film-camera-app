@@ -1,4 +1,12 @@
-const BUILD = "v8-native";
+const BUILD = "v9-native";
+
+// 어떤 오류든 화면에 보이게 한다. 원인을 모른 채 앱이 멈추는 상황을 막는다.
+window.addEventListener("error", (e) => {
+  try { showToast("오류: " + String(e.message || e.error).slice(0, 60)); } catch {}
+});
+window.addEventListener("unhandledrejection", (e) => {
+  try { showToast("오류: " + String(e.reason?.message || e.reason).slice(0, 60)); } catch {}
+});
 import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 
 const $ = (id) => document.getElementById(id);
@@ -118,6 +126,22 @@ $("tgEye").addEventListener("click", (e) => {
   e.target.textContent = eyeOn ? "켜짐" : "꺼짐";
   saveSettings();
 });
+$("tgCamMode").addEventListener("click", async () => {
+  if (nativeCam) {
+    await stopNative();
+    await startStream();
+    showToast("웹 방식으로 전환했어요");
+  } else {
+    try { localStorage.removeItem(NATIVE_FLAG); } catch {}
+    nativeBlocked = false;
+    if (video.srcObject) { video.srcObject.getTracks().forEach(t => t.stop()); video.srcObject = null; }
+    const ok = await startNative();
+    showToast(ok ? "네이티브로 전환했어요" : "네이티브를 사용할 수 없어요");
+    if (!ok) await startStream();
+  }
+  $("tgCamMode").textContent = nativeCam ? "네이티브" : "웹";
+});
+
 $("tgContour").addEventListener("click", (e) => {
   contourOn = !contourOn;
   e.target.classList.toggle("on", contourOn);
@@ -1158,6 +1182,22 @@ function syncUIFromState() {
   $("filmBtn").classList.toggle("on", filmOn);
 }
 
+// 화면 크기가 바뀌면 네이티브 프리뷰를 다시 맞춘다
+let relayoutTimer = null;
+window.addEventListener("resize", () => {
+  if (!nativeCam) return;
+  clearTimeout(relayoutTimer);
+  relayoutTimer = setTimeout(() => { relayoutNative().catch(() => {}); }, 300);
+});
+
+// 앱이 백그라운드로 갔다 오면 프리뷰를 재개한다
+document.addEventListener("visibilitychange", async () => {
+  if (document.hidden) { if (nativeCam) await stopNative(); return; }
+  if (mode === "cam" && CP() && !nativeBlocked && started) {
+    try { await startNative(); } catch {}
+  }
+});
+
 /* ===== 앱 내부 갤러리 (기기 저장소에 남는 임시 보관함) ===== */
 const DB_NAME = "filmcam", STORE = "shots";
 let dbP = null;
@@ -1226,7 +1266,7 @@ async function saveToDevice(blob, name) {
    WebView의 getUserMedia는 압축·축소된 스트림만 주고 초점 제어도 막혀 있다.
    네이티브 프리뷰는 WebView '뒤'에 그려지므로, 미리보기 영역만 투명하게 뚫어준다.
    실시간 보정을 후보정으로 옮겼기 때문에 프레임을 JS로 가져올 필요가 없어졌다. */
-let nativeCam = false;
+let nativeCam = false, started = false;
 function CP() { return window.Capacitor?.Plugins?.CameraPreview || null; }
 
 // 미리보기가 놓일 화면상의 사각형 (선택한 비율에 맞춰 레터박스)
@@ -1243,26 +1283,71 @@ function stageRect() {
   };
 }
 
+// 네이티브 카메라가 기기에서 앱을 죽이는 경우를 대비한 자가복구 장치.
+// 시도 직전에 표시를 남기고, 성공하면 지운다.
+// 앱이 죽으면 표시가 남아 있으므로 다음 실행에서 자동으로 웹 방식으로 되돌린다.
+const NATIVE_FLAG = "filmcam.nativeTry";
+let nativeBlocked = false;
+try { nativeBlocked = !!localStorage.getItem(NATIVE_FLAG); } catch {}
+
+function isNativeApp() {
+  try { return !!(window.Capacitor?.isNativePlatform?.() ?? window.Capacitor?.isNative); }
+  catch { return false; }
+}
+
+// 네이티브 카메라를 열기 전에 권한을 먼저 확보한다.
+// 권한 없이 네이티브 카메라를 열면 기기에 따라 앱이 즉시 종료된다.
+async function ensureCameraPermission() {
+  try {
+    const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    s.getTracks().forEach(t => t.stop());
+    await new Promise(r => setTimeout(r, 250));   // 기기가 카메라를 완전히 놓을 시간
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 async function startNative() {
   const cp = CP();
   if (!cp) return false;
+  if (nativeBlocked) { showToast("지난번 네이티브 카메라에서 문제가 있어 웹 방식으로 실행해요"); return false; }
+  if (!isNativeApp()) return false;
+
+  // 레이아웃이 잡힐 때까지 잠깐 기다린다 (0 크기로 열면 기기에 따라 앱이 죽는다)
+  let r = stageRect();
+  for (let i = 0; i < 12 && !(r.width > 20 && r.height > 20); i++) {
+    await new Promise(res => requestAnimationFrame(() => setTimeout(res, 30)));
+    r = stageRect();
+  }
+  if (!(r.width > 20 && r.height > 20)) { showToast("화면 준비가 안 돼 웹 방식으로 실행해요"); return false; }
+
+  if (!(await ensureCameraPermission())) { showToast("카메라 권한이 필요해요"); return false; }
+
   try {
+    try { localStorage.setItem(NATIVE_FLAG, "1"); } catch {}
     await stopNative();
-    const r = stageRect();
+    // 옵션은 문서화된 최소 항목만 사용한다. 기기별로 지원되지 않는 옵션이
+    // 네이티브 크래시를 일으킨 사례가 있어 실험적 옵션은 넣지 않는다.
     await cp.start({
-      parent: "nativeCam", className: "nativeCamView", toBack: true,
+      parent: "nativeCam",
+      className: "nativeCamView",
       position: facing === "user" ? "front" : "rear",
       x: r.x, y: r.y, width: r.width, height: r.height,
-      disableAudio: true, enableHighResolution: true, storeToFile: false,
-      disableExifHeaderStripping: true, lockAndroidOrientation: true,
+      toBack: true,
+      disableAudio: true,
     });
     nativeCam = true;
     document.body.classList.add("native");
+    // 여기까지 살아남았으면 안전하다고 보고 표시를 지운다
+    setTimeout(() => { try { localStorage.removeItem(NATIVE_FLAG); } catch {} }, 3000);
     await applyNativeFlash();
     return true;
   } catch (e) {
+    try { localStorage.removeItem(NATIVE_FLAG); } catch {}
     nativeCam = false;
     document.body.classList.remove("native");
+    showToast("네이티브 카메라 실패 — 웹 방식으로 전환해요");
     return false;
   }
 }
@@ -1360,25 +1445,49 @@ $("startBtn").addEventListener("click", async () => {
   const btn = $("startBtn");
   btn.disabled = true; btn.textContent = "준비 중…";
   try {
-    const fileset = await FilesetResolver.forVisionTasks(
-      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
-    );
-    landmarker = await FaceLandmarker.createFromOptions(fileset, {
-      baseOptions: {
-        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
-        delegate: "GPU",
-      },
-      runningMode: "IMAGE", numFaces: 1,
-    });
-    // 네이티브 카메라를 먼저 시도하고, 안 되면 기존 WebView 방식으로 되돌린다
-    const okNative = await startNative();
-    if (!okNative) await startStream();
-    else { glOK = initGLOnce(); reportCaps(); }
+    // 얼굴 인식 모델은 인터넷에서 받아온다. 실패해도 카메라는 켜져야 하므로 분리한다.
+    try {
+      const fileset = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+      );
+      landmarker = await FaceLandmarker.createFromOptions(fileset, {
+        baseOptions: {
+          modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+          delegate: "GPU",
+        },
+        runningMode: "IMAGE", numFaces: 1,
+      });
+    } catch (e) {
+      landmarker = null;
+      showToast("얼굴 인식 모듈을 불러오지 못했어요 (인터넷 확인) — 촬영은 가능해요");
+    }
+    // 네이티브를 먼저 시도하고, 어떤 이유로든 안 되면 기존 WebView 방식으로 되돌린다
+    let okNative = false;
+    try { okNative = await startNative(); } catch (e) { okNative = false; }
+    if (okNative) {
+      glOK = initGLOnce();
+      // 네이티브 모드에서도 촬영 후 보정을 위해 캔버스 크기 기준이 필요하다
+      glCanvas.width = 1080; glCanvas.height = 1440;
+      maskCanvas.width = warpCanvas.width = 216;
+      maskCanvas.height = warpCanvas.height = 288;
+      if (glOK) {
+        gl.activeTexture(gl.TEXTURE1);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, maskCanvas);
+        warpCtx.fillStyle = "rgb(128,128,0)";
+        warpCtx.fillRect(0, 0, warpCanvas.width, warpCanvas.height);
+        gl.activeTexture(gl.TEXTURE2);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, warpCanvas);
+      }
+      reportCaps();
+    } else {
+      await startStream();
+    }
     if (!glOK) showToast("이 기기는 GPU 처리를 지원하지 않아요");
     $("placeholder").style.display = "none";
     $("camScreen").classList.add("live");
     $("status").style.display = "flex";
     out.style.display = "block";
+    started = true;
     $("camTop").style.display = "flex";
     $("camBottom").style.display = "flex";
     $("shotBtn").disabled = false;
@@ -1386,6 +1495,10 @@ $("startBtn").addEventListener("click", async () => {
   } catch (err) {
     btn.disabled = false; btn.textContent = "카메라 켜기";
     alert("카메라를 켤 수 없어요.\n브라우저의 카메라 권한을 확인해 주세요.\n\n" + err.message);
+  }
+  finally {
+    const b = $("startBtn");
+    if (b) { b.disabled = false; b.textContent = "카메라 켜기"; }
   }
 });
 

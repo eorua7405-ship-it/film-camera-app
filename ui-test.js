@@ -84,8 +84,11 @@ const NATIVE = process.env.NATIVE === '1';
 const cpLog = [];
 if (NATIVE) {
   const png1x1 = fakeFrameB64();
-  window.Capacitor = { Plugins: { CameraPreview: {
-    start: async (o) => { cpLog.push(['start', o.position, o.width, o.height]); },
+  window.Capacitor = { isNativePlatform: () => true, Plugins: { CameraPreview: {
+    start: async (o) => {
+      cpLog.push(['start', o.position, o.width, o.height]);
+      if (process.env.CRASH === '1') throw new Error('네이티브 크래시 시뮬레이션');
+    },
     stop: async () => { cpLog.push(['stop']); },
     flip: async () => { cpLog.push(['flip']); },
     setFlashMode: async (o) => { cpLog.push(['flash', o.flashMode]); },
@@ -95,6 +98,13 @@ if (NATIVE) {
 function fakeFrameB64() {
   return createCanvas(1080, 1440).toDataURL('image/jpeg').split(',')[1];
 }
+
+// jsdom은 레이아웃 계산을 하지 않으므로 미리보기 영역 크기를 실제처럼 만들어준다
+window.Element.prototype.getBoundingClientRect = function () {
+  if (this.classList && this.classList.contains('stagewrap'))
+    return { left: 0, top: 62, width: 1080, height: 1440, right: 1080, bottom: 1502, x: 0, y: 62 };
+  return { left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0, x: 0, y: 0 };
+};
 
 const results = [];
 const check = (name, cond, detail = '') => results.push([name, !!cond, detail]);
@@ -197,10 +207,18 @@ setTimeout(() => {
       // processShot 단계별 추적
       console.log('  [진단] landmarker =', typeof window.__fakeLandmarker);
       console.log('  [진단] drawGL 호출 인자들 =', JSON.stringify(calls.map(c => Object.keys(c))));
-      if (NATIVE) {
+      if (NATIVE && process.env.CRASH === '1') {
+        check('크래시 시 폴백', !doc.body.classList.contains('native'), '웹 방식으로 전환됨');
+        check('촬영 계속 가능', doc.getElementById('editOut').width > 300,
+          doc.getElementById('editOut').width + 'px');
+      } else if (NATIVE) {
         check('네이티브 시작', cpLog.some(l => l[0] === 'start'), JSON.stringify(cpLog[0] || []));
         check('네이티브 촬영', cpLog.some(l => l[0] === 'capture'), '플러그인 capture 호출됨');
         check('네이티브 모드 CSS', doc.body.classList.contains('native'), 'body.native');
+        check('권한 선확보', cpLog.length > 0, 'getUserMedia 후 start');
+        await new Promise(r => setTimeout(r, 3300));   // 안전 판정 대기
+        check('크래시 표시 정리', !window.localStorage.getItem('filmcam.nativeTry'),
+          '3초 무사고 후 표시 제거');
       }
       // 촬영 결과가 원본 크기 그대로인지 (갤러리에 조각만 저장되던 버그 방지)
       const eo = doc.getElementById('editOut'), cc = doc.getElementById('out');
