@@ -240,3 +240,23 @@
     color: var(--text-dim); font-size: 14px; pointer-events: none;
   }
   .gal-empty.hide { display: none; }
+
+  /* ===== 네이티브 카메라 모드 =====
+     네이티브 프리뷰는 WebView 뒤에 그려지므로,
+     미리보기 영역만 투명하게 뚫고 나머지는 확실히 불투명하게 덮는다. */
+  #nativeCam { position: absolute; inset: 0; }
+  body.native { background: transparent; }
+  body.native #camScreen { background: transparent; }
+  body.native .stagewrap { background: transparent; }
+  body.native #out { display: none; }
+  body.native .topbar {
+    background: #000;
+    padding-bottom: 12px;
+  }
+  body.native .bottom {
+    background: #000;
+    padding-top: 14px;
+  }
+  body.native .status { top: calc(env(safe-area-inset-top, 0px) + 70px); }
+  /* 편집·갤러리 화면은 불투명해야 뒤 카메라가 비치지 않는다 */
+  body.native #editScreen, body.native #galleryScreen { background: var(--bg); }

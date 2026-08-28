@@ -1,3 +1,4 @@
+const BUILD = "v8-native";
 import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 
 const $ = (id) => document.getElementById(id);
@@ -42,9 +43,8 @@ const capCtx = capCanvas.getContext("2d");
 const FACE_OVAL = [10,338,297,332,284,251,389,356,454,323,361,288,397,365,379,378,400,377,152,148,176,149,150,136,172,58,132,93,234,127,162,21,54,103,67,109];
 
 /* ===== 편집 슬라이더 ===== */
-const SLIDERS = ["wrinkle","film","sharp","contrast","sat","rGain","gGain","bGain"];
-const S = {
-  flash: $("flash"),};
+const SLIDERS = ["flash","wrinkle","film","sharp","contrast","sat","rGain","gGain","bGain"];
+const S = {};
 for (const id of SLIDERS) {
   S[id] = $(id);
   const val = $(id + "Val");
@@ -75,11 +75,7 @@ $("blemAmt").addEventListener("input", (e) => {
   $("blemAmtVal").textContent = e.target.value;
   saveSettings();
 });
-$("filmStrength").addEventListener("input", (e) => {
-  filmStrength = e.target.value / 100;
-  $("filmStrengthVal").textContent = e.target.value;
-  saveSettings();
-});
+
 
 
 
@@ -135,6 +131,7 @@ $("filmStrength").addEventListener("input", (e) => {
   $("filmStrengthVal").textContent = e.target.value;
   filmOn = filmStrength > 0.005;
   $("filmBtn").classList.toggle("on", filmOn);
+  saveSettings();
 });
 
 // 플래시: 끄기 → 화면(전면) → 후면 라이트
@@ -148,9 +145,11 @@ $("flashBtn").addEventListener("click", async () => {
   flashMode = FLASH_MODES[i];
   $("flashTag").textContent = FLASH_TAG[flashMode];
   $("flashBtn").classList.toggle("on", flashMode !== "off");
+  applyNativeFlash();
   saveSettings();
 });
 function hasTorch() {
+  if (nativeCam) return true;   // 네이티브는 플러그인이 LED를 직접 제어
   try { return !!track()?.getCapabilities?.().torch; } catch { return false; }
 }
 async function setTorch(on) {
@@ -173,6 +172,7 @@ $("ratioBar").addEventListener("click", (e) => {
   $("ratioBar").querySelectorAll(".pill").forEach(x => x.classList.remove("on"));
   b.classList.add("on"); ratio = b.dataset.ratio;
   $("ratioTag").textContent = ratio;
+  relayoutNative();
   saveSettings();
 });
 $("focalBar").addEventListener("click", (e) => {
@@ -212,6 +212,7 @@ function cropRect(sw0, sh0) {
 function track() { return video.srcObject?.getVideoTracks()[0]; }
 
 async function applyFocal() {
+  if (nativeCam) return;   // 화각은 촬영 후 크롭으로 처리
   hwZoom = false;
   const t = track(); const caps = t?.getCapabilities?.();
   if (caps && caps.zoom) {
@@ -221,6 +222,7 @@ async function applyFocal() {
 }
 
 async function applyShutter() {
+  if (nativeCam) return;
   const t = track(); const caps = t?.getCapabilities?.();
   if (ssChoice === "auto") {
     if (caps?.exposureMode?.includes("continuous"))
@@ -245,7 +247,8 @@ let imageCapture = null;
 function reportCaps() {
   let caps = {};
   try { caps = track()?.getCapabilities?.() || {}; } catch {}
-  const parts = [video.videoWidth + "×" + video.videoHeight];
+  const parts = [BUILD];
+  parts.push(nativeCam ? "네이티브" : (video.videoWidth + "×" + video.videoHeight));
   parts.push(caps.focusMode ? "초점 O" : "초점 X");
   parts.push(caps.torch ? "LED O" : "LED X");
   if (imageCapture) parts.push("고화질 촬영 O");
@@ -253,6 +256,7 @@ function reportCaps() {
 }
 
 function tryFocus(m, nx, ny) {
+  if (nativeCam) return true;   // 네이티브 연속 오토포커스
   const t = track();
   if (!t?.getCapabilities) return false;
   let caps = {};
@@ -313,6 +317,7 @@ uniform float uFilm;
 uniform float uFlash;
 uniform vec2  uFlashC;
 uniform float uFlashR;
+uniform vec4  uLip;   // 입술 (중심 xy, 반경 xy)
 uniform float uTime;
 uniform vec2  uFmTone;      // 필름 (스케일, 리프트)
 uniform float uFmSat;
@@ -510,22 +515,50 @@ void main() {
     }
   }
 
-  // ===== 플래시 필터: 직광 플래시로 찍은 사진의 빛 성질을 재현 =====
-  // 핵심은 밝기가 아니라 '거리에 따른 급격한 감쇠'다.
-  // 가까운 피사체는 강하게 터지고 배경은 급격히 어두워지며, 얼굴 그림자는 평탄해진다.
+  // ===== 플래시 필터: 직광 온카메라 플래시 룩 =====
+  // 실제 보정 워크플로우를 그대로 따라간다:
+  // 전체를 눌러 깔고 → 가상 광원(카메라 정면·살짝 위)에서 하이라이트를 얹고 →
+  // 배경·머리카락 주변에 깊은 그림자 → 입술 광택 → 창백한 피부톤 → 그레인
   if (uFlash > 0.005) {
-    vec2 dp = uv - uFlashC; dp.y *= uAspect;
-    float dist = length(dp) / max(uFlashR, 0.001);
-    float falloff = 1.0 / (1.0 + dist * dist * 1.7);     // 역제곱 감쇠
-    res *= mix(1.0, 0.34 + 1.28 * falloff, uFlash);
-    // 정면광이라 얼굴 그림자가 얕아진다 (감마 리프트)
-    res = mix(res, pow(max(res, 0.0), vec3(0.80)), uFlash * skinM * 0.85);
-    // 피부 광택 (직광 특유의 하이라이트)
-    float lf2 = lumOf(res);
-    res += smoothstep(0.70, 0.96, lf2) * uFlash * skinM * 0.10;
-    // 플래시광은 약간 차갑고 대비가 강하다
-    res *= mix(vec3(1.0), vec3(0.995, 1.0, 1.035), uFlash * 0.6);
-    res = (res - 0.5) * (1.0 + 0.12 * uFlash) + 0.5;
+    // 광원은 렌즈 바로 위. 얼굴 중심보다 조금 위에서 쏜다.
+    vec2 lightP = uFlashC + vec2(0.0, 0.06 / max(uAspect, 0.001));
+    vec2 dp = uv - lightP; dp.y *= uAspect;
+    float d = length(dp) / max(uFlashR, 0.001);
+    float key = 1.0 / (1.0 + d * d * 2.2);            // 역제곱 감쇠
+
+    // 피사체/배경 분리: 얼굴 마스크 + 광원 근접도로 '빛 받는 영역'을 정의
+    float subject = clamp(max(skinM, key * key * 1.6), 0.0, 1.0);
+
+    // 1) 전체를 어둡게 깔아 배경을 죽인다
+    res *= mix(1.0, 0.60, uFlash);
+
+    // 2) 얼굴 전면(이마·콧대)에 하이라이트를 얹는다
+    float front = key * (0.50 + 0.50 * skinM);
+    res *= 1.0 + uFlash * front * 1.55;
+
+    // 3) 몸통·머리카락 주변과 배경은 더 깊게 눌러 분리한다
+    res *= 1.0 - uFlash * (1.0 - subject) * 0.50;
+
+    // 4) 입술: 선명한 색과 광택
+    vec2 lp = (uv - uLip.xy) / max(uLip.zw, vec2(0.001));
+    float lipW = (1.0 - smoothstep(0.55, 1.0, length(lp))) * step(0.0001, uLip.z);
+    res = mix(res, res * vec3(1.14, 0.90, 0.94), uFlash * lipW * 0.85);
+    res += smoothstep(0.62, 0.95, lumOf(res)) * uFlash * lipW * 0.22;
+
+    // 5) 피부를 살짝 창백하게 (직광이 혈색을 날린다)
+    vec3 pale = mix(res, vec3(lumOf(res)), 0.20) * vec3(1.03, 1.015, 1.04);
+    res = mix(res, pale, uFlash * skinM * 0.65);
+
+    // 6) 하이라이트 광택
+    res += smoothstep(0.72, 0.97, lumOf(res)) * uFlash * skinM * 0.10;
+
+    // 7) Y2K 파파라치 톤: 대비를 올리고 살짝 차갑게
+    res = (res - 0.5) * (1.0 + 0.20 * uFlash) + 0.5;
+    res *= mix(vec3(1.0), vec3(1.015, 0.995, 1.035), uFlash);
+
+    // 8) 필름 그레인 (직광 룩의 거친 질감)
+    float fg = fract(sin(dot(gl_FragCoord.xy + vec2(uTime * 331.0), vec2(12.9898, 78.233))) * 43758.5453) - 0.5;
+    res += fg * uFlash * 0.040;
   }
 
   // ===== 선명도 =====
@@ -606,7 +639,7 @@ function initGLOnce() {
   mkTex(0); mkTex(1); mkTex(2);
   ["uFrame","uMask","uWarp","uTexel","uAspect","uRadius","uSmooth","uBlemish","uEye",
    "uWrinkle","uFoldL","uFoldR","uFoldRad","uWarpAmt","uLens","uSharp","uContrast",
-   "uSat","uRGB","uWB","uFilm","uFlash","uFlashC","uFlashR","uTime","uFmTone","uFmSat","uFmHi","uFmSh","uFmGrain","uFmVig"]
+   "uSat","uRGB","uWB","uFilm","uFlash","uFlashC","uFlashR","uLip","uTime","uFmTone","uFmSat","uFmHi","uFmSh","uFmGrain","uFmVig"]
     .forEach(n => uLoc[n] = gl.getUniformLocation(prog, n));
   gl.uniform1i(uLoc.uFrame, 0);
   gl.uniform1i(uLoc.uMask, 1);
@@ -629,6 +662,7 @@ const FILM_PRESETS = [
 
 // 공통 유니폼 설정 후 1프레임 그리기
 function drawGL(srcTex, opt) {
+  if (typeof window !== "undefined" && window.__spyDrawGL) window.__spyDrawGL(opt);
   gl.viewport(0, 0, glCanvas.width, glCanvas.height);
   gl.uniform2f(uLoc.uTexel, 1 / opt.srcW, 1 / opt.srcH);
   gl.uniform1f(uLoc.uAspect, opt.srcH / opt.srcW);
@@ -659,6 +693,8 @@ function drawGL(srcTex, opt) {
   gl.uniform1f(uLoc.uFlash, opt.flash ?? 0);
   gl.uniform2f(uLoc.uFlashC, opt.flashC?.[0] ?? 0.5, 1 - (opt.flashC?.[1] ?? 0.5));
   gl.uniform1f(uLoc.uFlashR, opt.flashR ?? 0.5);
+  const lip = opt.lip ?? [0, 0, 0, 0];
+  gl.uniform4f(uLoc.uLip, lip[0], lip[1], lip[2], lip[3]);
   if (opt.fold) {
     gl.uniform4f(uLoc.uFoldL, opt.fold.l[0], opt.fold.l[1], opt.fold.l[2], opt.fold.l[3]);
     gl.uniform4f(uLoc.uFoldR, opt.fold.r[0], opt.fold.r[1], opt.fold.r[2], opt.fold.r[3]);
@@ -755,7 +791,16 @@ async function captureHighRes() {
   // 가능하면 프리뷰 스트림이 아니라 '센서 원본 정지 사진'을 받아 처리한다.
   // 프리뷰는 대역폭 때문에 압축·축소되지만, 정지 사진은 센서 해상도 그대로다.
   let src = video, sw0 = video.videoWidth, sh0 = video.videoHeight;
-  if (imageCapture) {
+  if (nativeCam) {
+    try {
+      const img = await captureNative();
+      src = img; sw0 = img.naturalWidth; sh0 = img.naturalHeight;
+    } catch (e) {
+      showToast("촬영 실패: " + (e?.message || e));
+      return;
+    }
+  }
+  if (!nativeCam && imageCapture) {
     try {
       const blob = await imageCapture.takePhoto();
       const bmp = await createImageBitmap(blob);
@@ -784,8 +829,8 @@ async function captureHighRes() {
   const cw = Math.round(sw), ch = Math.round(sh);
   capCanvas.width = cw; capCanvas.height = ch;
   capCtx.save();
-  if (facing === "user") { capCtx.translate(cw, 0); capCtx.scale(-1, 1); }
-  capCtx.drawImage(glOK ? glCanvas : video, sx, sy, sw, sh, 0, 0, cw, ch);
+  if (facing === "user" && !nativeCam) { capCtx.translate(cw, 0); capCtx.scale(-1, 1); }
+  capCtx.drawImage(glOK ? glCanvas : src, sx, sy, sw, sh, 0, 0, cw, ch);
   capCtx.restore();
 
   shotLandmarks = lastLandmarks;
@@ -820,16 +865,23 @@ async function captureHighRes() {
 
 // 찍은 사진에 보정 파이프라인 적용 (실시간이 아니라 후보정 단계)
 async function processShot() {
-  let L = null;
-  try {
-    if (landmarker) {
+  let L = null, why = "";
+  if (!landmarker) why = "얼굴 인식 모듈이 준비되지 않았어요";
+  else {
+    try {
       const r = landmarker.detect(capCanvas);
       if (r?.faceLandmarks?.length) L = r.faceLandmarks[0];
+      else why = "사진에서 얼굴을 찾지 못했어요";
+    } catch (e) {
+      why = "얼굴 인식 오류: " + (e?.message || e).toString().slice(0, 50);
     }
-  } catch {}
+  }
   if (!L) L = landmarksForCapture();
+  editOut.width = capCanvas.width;
+  editOut.height = capCanvas.height;
   editLandmarks = L;
   editFold = L ? foldCapsules(L) : null;
+  if (!L && why) showToast(why + " — 보정 없이 저장했어요");
 
   if (L) {
     maskCanvas.width = Math.max(2, Math.round(capCanvas.width / 5));
@@ -874,6 +926,7 @@ function landmarksForCapture() {
 }
 
 function enterEdit() {
+  stopNative();
   $("camScreen").classList.remove("on");
   $("galleryScreen").classList.remove("on");
   $("editScreen").classList.add("on");
@@ -889,11 +942,14 @@ function editRender() {
   const L = editLandmarks;
   const faceW = L ? Math.abs(L[454].x - L[234].x) * capCanvas.width : 0;
   // 플래시는 얼굴을 광원 중심으로 잡는다 (없으면 화면 중앙)
-  let fc = [0.5, 0.45], fr = 0.55;
+  let fc = [0.5, 0.45], fr = 0.55, lip = [0, 0, 0, 0];
   if (L) {
     const cx = (L[234].x + L[454].x) / 2, cy = (L[10].y + L[152].y) / 2;
     fc = [cx, cy];
     fr = Math.max(0.25, Math.abs(L[454].x - L[234].x) * 1.9);
+    lip = [(L[61].x + L[291].x) / 2, 1 - (L[13].y + L[14].y) / 2,
+           Math.abs(L[291].x - L[61].x) * 0.58,
+           Math.max(Math.abs(L[14].y - L[13].y) * 1.9, Math.abs(L[454].x - L[234].x) * 0.045)];
   }
   drawGL(capCanvas, {
     srcW: capCanvas.width, srcH: capCanvas.height,
@@ -904,7 +960,7 @@ function editRender() {
     warp: contourOn && !!L,
     lens: LENS_MAP[focal],
     flash: S.flash ? S.flash.value / 100 : 0,
-    flashC: fc, flashR: fr,
+    flashC: fc, flashR: fr, lip: lip,
     film: S.film.value / 100,
     fm: FILM_PRESETS[filmPreset],
     fold: editFold,
@@ -948,6 +1004,7 @@ function flashThumb() {
 
 async function openGallery() {
   mode = "gallery";
+  await stopNative();
   $("camScreen").classList.remove("on");
   $("editScreen").classList.remove("on");
   $("galleryScreen").classList.add("on");
@@ -1007,11 +1064,12 @@ async function openShot(shot) {
 }
 
 $("galleryBtn").addEventListener("click", openGallery);
-$("galBack").addEventListener("click", () => {
+$("galBack").addEventListener("click", async () => {
   revokeGallery();
   mode = "cam";
   $("galleryScreen").classList.remove("on");
   $("camScreen").classList.add("on");
+  if (CP()) await startNative();
 });
 
 function photoName() {
@@ -1164,6 +1222,86 @@ async function saveToDevice(blob, name) {
   return "저장했어요";
 }
 
+/* ===== 네이티브 카메라 (Camera2 기반 플러그인) =====
+   WebView의 getUserMedia는 압축·축소된 스트림만 주고 초점 제어도 막혀 있다.
+   네이티브 프리뷰는 WebView '뒤'에 그려지므로, 미리보기 영역만 투명하게 뚫어준다.
+   실시간 보정을 후보정으로 옮겼기 때문에 프레임을 JS로 가져올 필요가 없어졌다. */
+let nativeCam = false;
+function CP() { return window.Capacitor?.Plugins?.CameraPreview || null; }
+
+// 미리보기가 놓일 화면상의 사각형 (선택한 비율에 맞춰 레터박스)
+function stageRect() {
+  const el = document.querySelector(".stagewrap");
+  const r = el.getBoundingClientRect();
+  const target = RATIOS[ratio];
+  let w = r.width, h = r.height;
+  if (w / h > target) w = h * target; else h = w / target;
+  return {
+    x: Math.round(r.left + (r.width - w) / 2),
+    y: Math.round(r.top + (r.height - h) / 2),
+    width: Math.round(w), height: Math.round(h),
+  };
+}
+
+async function startNative() {
+  const cp = CP();
+  if (!cp) return false;
+  try {
+    await stopNative();
+    const r = stageRect();
+    await cp.start({
+      parent: "nativeCam", className: "nativeCamView", toBack: true,
+      position: facing === "user" ? "front" : "rear",
+      x: r.x, y: r.y, width: r.width, height: r.height,
+      disableAudio: true, enableHighResolution: true, storeToFile: false,
+      disableExifHeaderStripping: true, lockAndroidOrientation: true,
+    });
+    nativeCam = true;
+    document.body.classList.add("native");
+    await applyNativeFlash();
+    return true;
+  } catch (e) {
+    nativeCam = false;
+    document.body.classList.remove("native");
+    return false;
+  }
+}
+
+async function stopNative() {
+  const cp = CP();
+  if (!cp) return;
+  try { await cp.stop(); } catch {}
+  nativeCam = false;
+  document.body.classList.remove("native");
+}
+
+async function applyNativeFlash() {
+  const cp = CP();
+  if (!cp || !nativeCam) return;
+  const m = flashMode === "torch" ? "torch" : flashMode === "screen" ? "on" : "off";
+  try { await cp.setFlashMode({ flashMode: m }); } catch {}
+}
+
+// 네이티브 프리뷰를 현재 비율/위치에 다시 맞춘다
+async function relayoutNative() {
+  if (!nativeCam) return;
+  await startNative();
+}
+
+// 네이티브 촬영: 센서 원본 JPEG을 받아 캔버스로 옮긴다
+async function captureNative() {
+  const cp = CP();
+  const res = await cp.capture({ quality: 95 });
+  const b64 = res?.value;
+  if (!b64) throw new Error("촬영 결과가 비어 있어요");
+  const img = new Image();
+  await new Promise((ok, no) => {
+    img.onload = ok; img.onerror = () => no(new Error("사진을 읽을 수 없어요"));
+    img.src = "data:image/jpeg;base64," + b64;
+  });
+  return img;
+}
+
 /* ===== 카메라 시작 / 전환 ===== */
 async function startStream() {
   if (video.srcObject) {
@@ -1232,7 +1370,10 @@ $("startBtn").addEventListener("click", async () => {
       },
       runningMode: "IMAGE", numFaces: 1,
     });
-    await startStream();
+    // 네이티브 카메라를 먼저 시도하고, 안 되면 기존 WebView 방식으로 되돌린다
+    const okNative = await startNative();
+    if (!okNative) await startStream();
+    else { glOK = initGLOnce(); reportCaps(); }
     if (!glOK) showToast("이 기기는 GPU 처리를 지원하지 않아요");
     $("placeholder").style.display = "none";
     $("camScreen").classList.add("live");
@@ -1249,6 +1390,12 @@ $("startBtn").addEventListener("click", async () => {
 });
 
 $("flipBtn").addEventListener("click", async () => {
+  if (nativeCam) {
+    facing = facing === "user" ? "environment" : "user";
+    try { await CP().flip(); } catch { await startNative(); }
+    saveSettings();
+    return;
+  }
   facing = (facing === "user") ? "environment" : "user";
   try { await startStream(); }
   catch (err) {
@@ -1314,14 +1461,17 @@ let frameCount = 0, lastSeen = 0, maskDirty = false, lastRenderTs = 0;
 
 function loop(ts) {
   requestAnimationFrame(loop);
-  if (mode !== "cam" || video.readyState < 2) return;
+  if (mode !== "cam") return;
+  if (!nativeCam && video.readyState < 2) return;
   if (ts - lastRenderTs < 31) return;   // 30fps 상한
   lastRenderTs = ts;
 
   // 보정은 촬영 후에 하므로 프리뷰에서는 얼굴 인식을 돌리지 않는다.
   // 그만큼 프레임 처리가 가벼워져 미리보기 화질과 반응이 좋아진다.
   statusEl.classList.add("tracking");
-  statusText.textContent = "촬영 준비됨";
+  statusText.textContent = "촬영 준비됨 · " + BUILD + (nativeCam ? " · 네이티브" : " · 웹");
+
+  if (nativeCam) return;   // 네이티브 프리뷰는 화면 뒤에서 직접 그려진다
 
   // 프리뷰 렌더 (화각 + 화면 비율 크롭)
   const src = video;   // 후보정 방식: 프리뷰는 원본 그대로
@@ -1479,3 +1629,11 @@ $("shotBtn").addEventListener("click", async () => {
 // 앱을 다시 열어도 갤러리 썸네일과 설정이 남아있게 한다
 loadSettings();
 refreshGalleryThumb();
+
+
+// 테스트 훅
+if (typeof window !== "undefined") {
+  window.__testStart = () => startStream();
+  window.__testCapture = () => captureHighRes();
+  window.__testGalleryAll = () => galleryAll();
+}
