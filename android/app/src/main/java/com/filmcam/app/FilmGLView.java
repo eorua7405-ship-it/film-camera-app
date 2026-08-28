@@ -46,9 +46,10 @@ public class FilmGLView extends GLSurfaceView {
                 // 화면 회전량은 CameraX가 알려준다 — 셰이더에서 그만큼 되돌린다
                 request.setTransformationInfoListener(
                         ContextCompat.getMainExecutor(getContext()),
-                        new androidx.core.util.Consumer<SurfaceRequest.TransformationInfo>() {
+                        new SurfaceRequest.TransformationInfoListener() {
                             @Override
-                            public void accept(SurfaceRequest.TransformationInfo info) {
+                            public void onTransformationInfoUpdate(
+                                    SurfaceRequest.TransformationInfo info) {
                                 renderer.rotationDeg = info.getRotationDegrees();
                             }
                         });
