@@ -260,3 +260,6 @@
   body.native .status { top: calc(env(safe-area-inset-top, 0px) + 70px); }
   /* 편집·갤러리 화면은 불투명해야 뒤 카메라가 비치지 않는다 */
   body.native #editScreen, body.native #galleryScreen { background: var(--bg); }
+
+  .diag { font-size: 11px; color: #8de0b0; padding: 2px 0 4px; }
+  .diag.bad { color: #ff9a9a; }

@@ -1,4 +1,4 @@
-const BUILD = "v9-native";
+const BUILD = "v11";
 
 // 어떤 오류든 화면에 보이게 한다. 원인을 모른 채 앱이 멈추는 상황을 막는다.
 window.addEventListener("error", (e) => {
@@ -127,19 +127,32 @@ $("tgEye").addEventListener("click", (e) => {
   saveSettings();
 });
 $("tgCamMode").addEventListener("click", async () => {
+  const b = $("tgCamMode");
   if (nativeCam) {
     await stopNative();
     await startStream();
+    b.textContent = "웹"; b.classList.remove("on");
     showToast("웹 방식으로 전환했어요");
-  } else {
-    try { localStorage.removeItem(NATIVE_FLAG); } catch {}
-    nativeBlocked = false;
-    if (video.srcObject) { video.srcObject.getTracks().forEach(t => t.stop()); video.srcObject = null; }
-    const ok = await startNative();
-    showToast(ok ? "네이티브로 전환했어요" : "네이티브를 사용할 수 없어요");
-    if (!ok) await startStream();
+    return;
   }
-  $("tgCamMode").textContent = nativeCam ? "네이티브" : "웹";
+  if (!CP() || !isNativeApp()) {
+    showToast("이 빌드에는 네이티브 카메라가 없어요 (준비 중인 기능)");
+    return;
+  }
+  showToast("네이티브 카메라를 시도해요 (실험 기능)");
+  try { localStorage.removeItem(NATIVE_FLAG); } catch {}
+  nativeBlocked = false;
+  if (video.srcObject) { video.srcObject.getTracks().forEach(t => t.stop()); video.srcObject = null; }
+  let ok = false;
+  try { ok = await startNative(); } catch { ok = false; }
+  if (ok) {
+    b.textContent = "네이티브"; b.classList.add("on");
+    glOK = initGLOnce();
+  } else {
+    showToast("네이티브를 쓸 수 없어 웹 방식으로 되돌렸어요");
+    await startStream();
+    b.textContent = "웹"; b.classList.remove("on");
+  }
 });
 
 $("tgContour").addEventListener("click", (e) => {
@@ -875,7 +888,7 @@ async function captureHighRes() {
     const shot = {
       id: Date.now() + "-" + Math.random().toString(36).slice(2, 7),
       ts: Date.now(), processed: proc, original: orig,
-      landmarks: shotLandmarks ? shotLandmarks.map(p => ({ x: p.x, y: p.y })) : null,
+      landmarks: editLandmarks ? editLandmarks.map(p => ({ x: p.x, y: p.y })) : null,
       cropX: shotCropX, cropY: shotCropY, mirror: shotMirror,
       settings: { skinAmt, blemAmt, eyeOn, contourOn, filmPreset, filmStrength, wbCam },
     };
@@ -888,18 +901,40 @@ async function captureHighRes() {
 }
 
 // 찍은 사진에 보정 파이프라인 적용 (실시간이 아니라 후보정 단계)
+let lastDetectWhy = "";
+const detectCanvas = document.createElement("canvas");
+const detectCtx = detectCanvas.getContext("2d", { willReadFrequently: true });
+
+function scaleForDetect(srcCanvas, maxSide) {
+  const w = srcCanvas.width, h = srcCanvas.height;
+  const scale = Math.min(1, maxSide / Math.max(w, h));
+  if (scale >= 1) return srcCanvas;
+  detectCanvas.width = Math.max(2, Math.round(w * scale));
+  detectCanvas.height = Math.max(2, Math.round(h * scale));
+  detectCtx.drawImage(srcCanvas, 0, 0, detectCanvas.width, detectCanvas.height);
+  return detectCanvas;
+}
+
 async function processShot() {
   let L = null, why = "";
   if (!landmarker) why = "얼굴 인식 모듈이 준비되지 않았어요";
   else {
-    try {
-      const r = landmarker.detect(capCanvas);
-      if (r?.faceLandmarks?.length) L = r.faceLandmarks[0];
-      else why = "사진에서 얼굴을 찾지 못했어요";
-    } catch (e) {
-      why = "얼굴 인식 오류: " + (e?.message || e).toString().slice(0, 50);
+    // 원본은 2000px가 넘는 경우가 많다. 큰 이미지를 그대로 넣으면
+    // GPU 텍스처 한계에 걸려 얼굴을 못 찾는 기기가 있어 축소본으로 검출한다.
+    // 랜드마크는 0~1 비율값이라 원본에 그대로 대응된다.
+    const tries = [1024, 640, 1536];
+    for (const maxSide of tries) {
+      try {
+        const src = scaleForDetect(capCanvas, maxSide);
+        const r = landmarker.detect(src);
+        if (r?.faceLandmarks?.length) { L = r.faceLandmarks[0]; break; }
+        why = "사진에서 얼굴을 찾지 못했어요";
+      } catch (e) {
+        why = "얼굴 인식 오류: " + (e?.message || e).toString().slice(0, 60);
+      }
     }
   }
+  lastDetectWhy = L ? "" : why;
   if (!L) L = landmarksForCapture();
   editOut.width = capCanvas.width;
   editOut.height = capCanvas.height;
@@ -956,6 +991,17 @@ function enterEdit() {
   $("editScreen").classList.add("on");
   const wr = $("wrinkle").closest(".row");
   if (wr) wr.style.opacity = editFold ? "1" : "0.4";
+  const diag = $("editDiag");
+  if (diag) {
+    if (editLandmarks) {
+      diag.textContent = "얼굴 인식 O · 피부결 " + Math.round(skinAmt * 100) +
+                         " · 잡티 " + Math.round(blemAmt * 100);
+      diag.classList.remove("bad");
+    } else {
+      diag.textContent = "얼굴 인식 X — " + (lastDetectWhy || "원인 불명") + " (보정 미적용)";
+      diag.classList.add("bad");
+    }
+  }
   editRender();
 }
 
@@ -1069,7 +1115,7 @@ async function openShot(shot) {
     bmp.close?.();
     editLandmarks = shot.landmarks || null;
     shotLandmarks = shot.landmarks || null;
-    shotCropX = shot.cropX ?? 1; shotCropY = shot.cropY ?? 1;
+    shotCropX = 1; shotCropY = 1;
     shotMirror = shot.mirror ?? true;
     editFold = editLandmarks ? foldCapsules(editLandmarks) : null;
     if (editLandmarks) {
@@ -1193,8 +1239,8 @@ window.addEventListener("resize", () => {
 // 앱이 백그라운드로 갔다 오면 프리뷰를 재개한다
 document.addEventListener("visibilitychange", async () => {
   if (document.hidden) { if (nativeCam) await stopNative(); return; }
-  if (mode === "cam" && CP() && !nativeBlocked && started) {
-    try { await startNative(); } catch {}
+  if (mode === "cam" && nativeCam) {
+    try { await startNative(); } catch { await startStream(); }
   }
 });
 
@@ -1450,38 +1496,26 @@ $("startBtn").addEventListener("click", async () => {
       const fileset = await FilesetResolver.forVisionTasks(
         "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
       );
-      landmarker = await FaceLandmarker.createFromOptions(fileset, {
+      const mkOpts = (delegate) => ({
         baseOptions: {
           modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
-          delegate: "GPU",
+          delegate,
         },
         runningMode: "IMAGE", numFaces: 1,
       });
+      try {
+        landmarker = await FaceLandmarker.createFromOptions(fileset, mkOpts("GPU"));
+      } catch (e) {
+        // GPU 델리게이트를 지원하지 않는 기기가 있다
+        landmarker = await FaceLandmarker.createFromOptions(fileset, mkOpts("CPU"));
+      }
     } catch (e) {
       landmarker = null;
       showToast("얼굴 인식 모듈을 불러오지 못했어요 (인터넷 확인) — 촬영은 가능해요");
     }
-    // 네이티브를 먼저 시도하고, 어떤 이유로든 안 되면 기존 WebView 방식으로 되돌린다
-    let okNative = false;
-    try { okNative = await startNative(); } catch (e) { okNative = false; }
-    if (okNative) {
-      glOK = initGLOnce();
-      // 네이티브 모드에서도 촬영 후 보정을 위해 캔버스 크기 기준이 필요하다
-      glCanvas.width = 1080; glCanvas.height = 1440;
-      maskCanvas.width = warpCanvas.width = 216;
-      maskCanvas.height = warpCanvas.height = 288;
-      if (glOK) {
-        gl.activeTexture(gl.TEXTURE1);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, maskCanvas);
-        warpCtx.fillStyle = "rgb(128,128,0)";
-        warpCtx.fillRect(0, 0, warpCanvas.width, warpCanvas.height);
-        gl.activeTexture(gl.TEXTURE2);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, warpCanvas);
-      }
-      reportCaps();
-    } else {
-      await startStream();
-    }
+    // 카메라는 항상 검증된 웹 방식으로 켠다.
+    // 네이티브는 설정에서 사용자가 직접 켤 때만 시도한다 (자동 시도는 앱이 못 켜질 위험).
+    await startStream();
     if (!glOK) showToast("이 기기는 GPU 처리를 지원하지 않아요");
     $("placeholder").style.display = "none";
     $("camScreen").classList.add("live");
@@ -1739,6 +1773,13 @@ $("shotBtn").addEventListener("click", async () => {
 });
 
 
+// 네이티브 카메라를 쓸 수 없는 빌드면 버튼을 비활성으로 보여준다
+(function initCamModeBtn() {
+  const b = $("tgCamMode");
+  if (!b) return;
+  if (!CP() || !isNativeApp()) { b.textContent = "웹"; b.style.opacity = "0.45"; }
+})();
+
 // 앱을 다시 열어도 갤러리 썸네일과 설정이 남아있게 한다
 loadSettings();
 refreshGalleryThumb();
@@ -1748,5 +1789,6 @@ refreshGalleryThumb();
 if (typeof window !== "undefined") {
   window.__testStart = () => startStream();
   window.__testCapture = () => captureHighRes();
+  window.__testOpenShot = (s) => openShot(s);
   window.__testGalleryAll = () => galleryAll();
 }

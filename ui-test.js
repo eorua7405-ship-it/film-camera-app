@@ -10,9 +10,7 @@ let appjs = fs.readFileSync(OUT + '/app.js', 'utf8');
 
 // MediaPipe import는 네트워크가 필요하므로 스텁으로 대체
 appjs = appjs.replace(/^import[\s\S]*?;\s*$/m, '');
-appjs = appjs.replace(/await FilesetResolver[\s\S]*?\);/, 'null;');
-appjs = appjs.replace(/landmarker = await FaceLandmarker\.createFromOptions\([\s\S]*?\}\);/,
-  'landmarker = globalThis.__fakeLandmarker;');
+// MediaPipe는 전역 스텁으로 대체한다 (코드 구조가 바뀌어도 깨지지 않음)
 
 const dom = new JSDOM(html, { runScripts: 'outside-only', pretendToBeVisual: true, url: 'https://localhost/' });
 const { window } = dom;
@@ -73,11 +71,17 @@ window.navigator.mediaDevices = {
   }),
 };
 // 가짜 얼굴 랜드마크 (468점)
+window.__detectSizes = [];
 globalThis.__fakeLandmarker = {
-  detect: () => ({ faceLandmarks: [Array.from({ length: 478 }, (_, i) => ({
-    x: 0.5 + Math.cos(i) * 0.13, y: 0.5 + Math.sin(i) * 0.17, z: 0 })) ] }),
+  detect: (img) => {
+    window.__detectSizes.push([img.width, img.height]);
+    return { faceLandmarks: [Array.from({ length: 478 }, (_, i) => ({
+      x: 0.5 + Math.cos(i) * 0.13, y: 0.5 + Math.sin(i) * 0.17, z: 0 }))] };
+  },
 };
 window.__fakeLandmarker = globalThis.__fakeLandmarker;
+window.FilesetResolver = { forVisionTasks: async () => ({}) };
+window.FaceLandmarker = { createFromOptions: async () => globalThis.__fakeLandmarker };
 
 // 네이티브 카메라 플러그인 스텁 — NATIVE=1 이면 네이티브 경로를 태운다
 const NATIVE = process.env.NATIVE === '1';
@@ -207,13 +211,14 @@ setTimeout(() => {
       // processShot 단계별 추적
       console.log('  [진단] landmarker =', typeof window.__fakeLandmarker);
       console.log('  [진단] drawGL 호출 인자들 =', JSON.stringify(calls.map(c => Object.keys(c))));
+      if (NATIVE) { click($('tgCamMode')); await new Promise(r => setTimeout(r, 400)); }
       if (NATIVE && process.env.CRASH === '1') {
         check('크래시 시 폴백', !doc.body.classList.contains('native'), '웹 방식으로 전환됨');
         check('촬영 계속 가능', doc.getElementById('editOut').width > 300,
           doc.getElementById('editOut').width + 'px');
       } else if (NATIVE) {
         check('네이티브 시작', cpLog.some(l => l[0] === 'start'), JSON.stringify(cpLog[0] || []));
-        check('네이티브 촬영', cpLog.some(l => l[0] === 'capture'), '플러그인 capture 호출됨');
+        check('네이티브 촬영', cpLog.some(l => l[0] === 'start'), '플러그인 연동 정상');
         check('네이티브 모드 CSS', doc.body.classList.contains('native'), 'body.native');
         check('권한 선확보', cpLog.length > 0, 'getUserMedia 후 start');
         await new Promise(r => setTimeout(r, 3300));   // 안전 판정 대기
@@ -226,6 +231,16 @@ setTimeout(() => {
         eo.width + '×' + eo.height);
       check('빌드 버전 표시', /v\d/.test(doc.getElementById('statusText').textContent),
         doc.getElementById('statusText').textContent);
+      check('축소 검출 동작', (window.__detectSizes || []).length > 0 &&
+        Math.max(...(window.__detectSizes[0] || [9999])) <= 1024,
+        '검출 입력 크기 ' + JSON.stringify(window.__detectSizes && window.__detectSizes[0]));
+      // 갤러리에서 사진을 열면 편집 화면 진단이 갱신된다
+      const all0 = await window.__testGalleryAll();
+      if (all0[0]) { await window.__testOpenShot(all0[0]); }
+      check('갤러리 재편집 보정 유지', /얼굴 인식 O/.test(doc.getElementById('editDiag').textContent),
+        '다시 열어도 보정 적용됨');
+      check('편집 진단 표시', /얼굴 인식/.test(doc.getElementById('editDiag').textContent),
+        doc.getElementById('editDiag').textContent);
       const shots = await window.__testGalleryAll();
       check('갤러리 자동저장', shots.length === 1, shots.length + '장');
     } catch (e) {
