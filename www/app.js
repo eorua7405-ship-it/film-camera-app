@@ -27,7 +27,7 @@ let skinOn = true, blemishOn = true, contourOn = true, filmOn = true, eyeOn = tr
 let filmPreset = 0, filmStrength = 0.6;
 let skinAmt = 0.6, blemAmt = 0.6;   // 피부결·잡티 세기 (슬라이더 100 = 최대 강도)
 let mode = "cam";   // cam | edit
-let landmarker = null, lastLandmarks = null;
+let landmarker = null, lastLandmarks = null, editLandmarks = null;
 
 const video = document.createElement("video");
 video.playsInline = true; video.muted = true;
@@ -43,7 +43,8 @@ const FACE_OVAL = [10,338,297,332,284,251,389,356,454,323,361,288,397,365,379,37
 
 /* ===== 편집 슬라이더 ===== */
 const SLIDERS = ["wrinkle","film","sharp","contrast","sat","rGain","gGain","bGain"];
-const S = {};
+const S = {
+  flash: $("flash"),};
 for (const id of SLIDERS) {
   S[id] = $(id);
   const val = $(id + "Val");
@@ -67,14 +68,17 @@ $("filmPresets").addEventListener("click", (e) => {
   document.querySelectorAll("#filmPresets .pill").forEach(b => b.classList.remove("on"));
   btn.classList.add("on");
   filmPreset = Number(btn.dataset.fp);
+  saveSettings();
 });
 $("blemAmt").addEventListener("input", (e) => {
   blemAmt = e.target.value / 100;
   $("blemAmtVal").textContent = e.target.value;
+  saveSettings();
 });
 $("filmStrength").addEventListener("input", (e) => {
   filmStrength = e.target.value / 100;
   $("filmStrengthVal").textContent = e.target.value;
+  saveSettings();
 });
 
 
@@ -110,16 +114,19 @@ $("skinSeg").addEventListener("click", (e) => {
   b.classList.add("on");
   skinAmt = Number(b.dataset.skin) / 100;
   skinOn = skinAmt > 0;
+  saveSettings();
 });
 $("tgEye").addEventListener("click", (e) => {
   eyeOn = !eyeOn;
   e.target.classList.toggle("on", eyeOn);
   e.target.textContent = eyeOn ? "켜짐" : "꺼짐";
+  saveSettings();
 });
 $("tgContour").addEventListener("click", (e) => {
   contourOn = !contourOn;
   e.target.classList.toggle("on", contourOn);
   e.target.textContent = contourOn ? "켜짐" : "꺼짐";
+  saveSettings();
 });
 
 // 필름 on/off는 아이콘 길게 대신 이중 탭 없이: 세기 0이면 자동 off
@@ -141,6 +148,7 @@ $("flashBtn").addEventListener("click", async () => {
   flashMode = FLASH_MODES[i];
   $("flashTag").textContent = FLASH_TAG[flashMode];
   $("flashBtn").classList.toggle("on", flashMode !== "off");
+  saveSettings();
 });
 function hasTorch() {
   try { return !!track()?.getCapabilities?.().torch; } catch { return false; }
@@ -158,12 +166,14 @@ $("ssBar").addEventListener("click", (e) => {
   b.classList.add("on"); ssChoice = b.dataset.ss;
   $("ssTag").textContent = ssChoice === "auto" ? "A" : ssChoice;
   applyShutter();
+  saveSettings();
 });
 $("ratioBar").addEventListener("click", (e) => {
   const b = e.target.closest(".pill"); if (!b) return;
   $("ratioBar").querySelectorAll(".pill").forEach(x => x.classList.remove("on"));
   b.classList.add("on"); ratio = b.dataset.ratio;
   $("ratioTag").textContent = ratio;
+  saveSettings();
 });
 $("focalBar").addEventListener("click", (e) => {
   const b = e.target.closest(".pill"); if (!b) return;
@@ -171,6 +181,7 @@ $("focalBar").addEventListener("click", (e) => {
   b.classList.add("on"); focal = Number(b.dataset.focal);
   $("focalTag").textContent = focal;
   applyFocal();
+  saveSettings();
 });
 $("filmPresets").addEventListener("click", (e) => {
   const b = e.target.closest(".pill"); if (!b) return;
@@ -183,6 +194,7 @@ $("wbBar").addEventListener("click", (e) => {
   $("wbBar").querySelectorAll(".pill").forEach(x => x.classList.remove("on"));
   b.classList.add("on"); wbCam = WB_CAM[b.dataset.wbc];
   $("wbBtn").classList.toggle("on", wbCam !== 0);
+  saveSettings();
 });
 
 // 화면 비율
@@ -298,6 +310,9 @@ uniform float uSat;
 uniform vec3  uRGB;
 uniform float uWB;
 uniform float uFilm;
+uniform float uFlash;
+uniform vec2  uFlashC;
+uniform float uFlashR;
 uniform float uTime;
 uniform vec2  uFmTone;      // 필름 (스케일, 리프트)
 uniform float uFmSat;
@@ -403,7 +418,8 @@ void main() {
                         + lumOf(texture2D(uFrame, uv - o2).rgb)) * 0.5 - lumC);
       }
       float roundness = max(rnd1, rnd2);
-      float th = 0.045 - 0.014 * uBlemish;
+
+      float th = 0.048 - 0.007 * uBlemish;
       float spot = max(smoothstep(th * 0.5, th, pit),
                        smoothstep(th * 0.8, th * 1.6, redPit) * 0.7);
       spot *= smoothstep(th * 0.20, th * 0.55, roundness);  // 선형 구조(주름·골) 배제
@@ -413,13 +429,15 @@ void main() {
       spot *= smoothstep(0.12, 0.28, c.g);                 // 극암부(머리카락 등) 보호
       spot *= smoothstep(0.10, 0.22, minI);                // 검은 구멍 인접(콧구멍 테두리) 보호
       spot *= 1.0 - smoothstep(0.20, 0.30, pit);           // 너무 깊은 함몰은 구멍이지 잡티가 아님
-      float glare = smoothstep(th * 0.5, th, lumC - maxF) * 0.55 * uBlemish * (1.0 - mk.b);   // 사방보다 밝은 반점만
-      spot = min(spot * 0.9 * uBlemish, 0.9);
+      // 강도 상단(90~100)에서 과검출이 급증하므로 곡선을 눌러준다
+      float strength = uBlemish * (1.0 - 0.28 * smoothstep(0.75, 1.0, uBlemish));
+      float glare = smoothstep(th * 0.5, th, lumC - maxF) * 0.55 * strength * (1.0 - mk.b);
+      spot = min(spot * 0.9 * strength, 0.85);
 
       // 조명 결함 복구: 밝기 '배율'만 조정 (Dodge/Burn) — 색·질감 불변, 상한 존재.
       // 덧셈이 아닌 제한된 곱셈이라 주변 구조물이 섞여 들어올 수 없다.
-      float liftL = clamp(lumF - lumC, 0.0, 0.12);         // 결함 깊이 (상한)
-      float dodge = min(1.0 + (liftL / max(lumC, 0.05)) * spot, 1.22);
+      float liftL = clamp(lumF - lumC, 0.0, 0.085);         // 결함 깊이 (상한)
+      float dodge = min(1.0 + (liftL / max(lumC, 0.05)) * spot, 1.16);
       float dropL = clamp(lumC - lumF, 0.0, 0.10);
       float burn = max(1.0 - (dropL / max(lumC, 0.05)) * glare, 0.78);
       r = c * dodge * burn;
@@ -490,6 +508,24 @@ void main() {
         res *= 1.0 + fw * uWrinkle * gate * 0.035;         // 볼륨 리라이팅
       }
     }
+  }
+
+  // ===== 플래시 필터: 직광 플래시로 찍은 사진의 빛 성질을 재현 =====
+  // 핵심은 밝기가 아니라 '거리에 따른 급격한 감쇠'다.
+  // 가까운 피사체는 강하게 터지고 배경은 급격히 어두워지며, 얼굴 그림자는 평탄해진다.
+  if (uFlash > 0.005) {
+    vec2 dp = uv - uFlashC; dp.y *= uAspect;
+    float dist = length(dp) / max(uFlashR, 0.001);
+    float falloff = 1.0 / (1.0 + dist * dist * 1.7);     // 역제곱 감쇠
+    res *= mix(1.0, 0.34 + 1.28 * falloff, uFlash);
+    // 정면광이라 얼굴 그림자가 얕아진다 (감마 리프트)
+    res = mix(res, pow(max(res, 0.0), vec3(0.80)), uFlash * skinM * 0.85);
+    // 피부 광택 (직광 특유의 하이라이트)
+    float lf2 = lumOf(res);
+    res += smoothstep(0.70, 0.96, lf2) * uFlash * skinM * 0.10;
+    // 플래시광은 약간 차갑고 대비가 강하다
+    res *= mix(vec3(1.0), vec3(0.995, 1.0, 1.035), uFlash * 0.6);
+    res = (res - 0.5) * (1.0 + 0.12 * uFlash) + 0.5;
   }
 
   // ===== 선명도 =====
@@ -570,7 +606,7 @@ function initGLOnce() {
   mkTex(0); mkTex(1); mkTex(2);
   ["uFrame","uMask","uWarp","uTexel","uAspect","uRadius","uSmooth","uBlemish","uEye",
    "uWrinkle","uFoldL","uFoldR","uFoldRad","uWarpAmt","uLens","uSharp","uContrast",
-   "uSat","uRGB","uWB","uFilm","uTime","uFmTone","uFmSat","uFmHi","uFmSh","uFmGrain","uFmVig"]
+   "uSat","uRGB","uWB","uFilm","uFlash","uFlashC","uFlashR","uTime","uFmTone","uFmSat","uFmHi","uFmSh","uFmGrain","uFmVig"]
     .forEach(n => uLoc[n] = gl.getUniformLocation(prog, n));
   gl.uniform1i(uLoc.uFrame, 0);
   gl.uniform1i(uLoc.uMask, 1);
@@ -620,6 +656,9 @@ function drawGL(srcTex, opt) {
   gl.uniform1f(uLoc.uWarpAmt, opt.warp ? 1 : 0);
   gl.uniform1f(uLoc.uWrinkle, opt.fold ? (opt.wrinkle ?? 0) : 0);
   gl.uniform1f(uLoc.uEye, opt.eye ?? 0);
+  gl.uniform1f(uLoc.uFlash, opt.flash ?? 0);
+  gl.uniform2f(uLoc.uFlashC, opt.flashC?.[0] ?? 0.5, 1 - (opt.flashC?.[1] ?? 0.5));
+  gl.uniform1f(uLoc.uFlashR, opt.flashR ?? 0.5);
   if (opt.fold) {
     gl.uniform4f(uLoc.uFoldL, opt.fold.l[0], opt.fold.l[1], opt.fold.l[2], opt.fold.l[3]);
     gl.uniform4f(uLoc.uFoldR, opt.fold.r[0], opt.fold.r[1], opt.fold.r[2], opt.fold.r[3]);
@@ -636,7 +675,7 @@ function drawGL(srcTex, opt) {
 // 실제 선이 기준선에서 튀어나온 만큼의 40%를 당기는 변위 벡터장을 그린다.
 // 옆모습에서는 코 방향 실루엣(콧대·입)은 보호한다.
 function computeWarpMap(w, hh) {
-  const L = lastLandmarks;
+  const L = editLandmarks || lastLandmarks;
   const n = FACE_OVAL.length;
   const faceW = Math.abs(L[454].x - L[234].x);
   const cx = (L[234].x + L[454].x) / 2;
@@ -710,28 +749,6 @@ function computeWarpMap(w, hh) {
 const PREVIEW_SCALE = 0.5;   // 미리보기는 절반 해상도 → 발열 절약, 촬영은 원본 해상도
 
 let prevW = 0, prevH = 0;   // 프리뷰 해상도 (startStream에서 설정)
-function camPreviewFrame() {
-  if (!glOK) return video;
-  if (glCanvas.width !== prevW || glCanvas.height !== prevH) {
-    glCanvas.width = prevW; glCanvas.height = prevH;   // 촬영 후 프리뷰 크기 복귀
-  }
-  buildFaceMaskIfNeeded();
-  const faceW = lastLandmarks ? Math.abs(lastLandmarks[454].x - lastLandmarks[234].x) * video.videoWidth : 0;
-  drawGL(video, {
-    srcW: video.videoWidth, srcH: video.videoHeight,
-    radius: Math.max(2.5, faceW * 0.030),
-    smooth: (skinOn && lastLandmarks) ? skinAmt : 0,
-    blemish: (blemishOn && lastLandmarks) ? blemAmt : 0,
-    eye: (eyeOn && lastLandmarks) ? 0.55 : 0,
-    film: filmOn ? filmStrength : 0,
-    fm: FILM_PRESETS[filmPreset],
-    wb: wbCam,
-    lens: LENS_MAP[focal],
-    warp: contourOn && !!lastLandmarks,
-    time: (performance.now() % 10000) / 10000,
-  });
-  return glCanvas;
-}
 
 /* ===== 고해상도 촬영 → 편집 화면 ===== */
 async function captureHighRes() {
@@ -755,18 +772,11 @@ async function captureHighRes() {
   glCanvas.width = sw0;
   glCanvas.height = sh0;
   const faceW = lastLandmarks ? Math.abs(lastLandmarks[454].x - lastLandmarks[234].x) * sw0 : 0;
+  // 후보정 방식: 촬영 시점에는 원본을 그대로 보존한다 (렌즈 왜곡만 적용)
   drawGL(src, {
     srcW: sw0, srcH: sh0,
-    radius: Math.max(2.5, faceW * 0.030),
-    smooth: (skinOn && lastLandmarks) ? skinAmt : 0,
-    blemish: (blemishOn && lastLandmarks) ? blemAmt : 0,
-    eye: (eyeOn && lastLandmarks) ? 0.55 : 0,
     lens: LENS_MAP[focal],
-    warp: contourOn && !!lastLandmarks,
-    film: filmOn ? filmStrength : 0,               // 필름 프리셋을 사진에 직접 굽기
-    fm: FILM_PRESETS[filmPreset],
-    wb: wbCam,
-    time: (performance.now() % 10000) / 10000,     // 그레인은 사진에 고정
+    time: 0.5,
   });
 
   // 미러링 + 화각 크롭을 구워서 편집 원본 확정
@@ -782,7 +792,54 @@ async function captureHighRes() {
   shotCropX = sw / sw0;
   shotCropY = sh / sh0;
   shotMirror = facing === "user";
-  enterEdit();
+  if (src !== video) src.close?.();
+
+  // 후보정: 찍은 사진에 얼굴 인식 → 마스크 → 보정을 한 번에 적용
+  await processShot();
+
+  // 자동으로 앱 내부 갤러리에 보관 (별도 저장 화면 없음)
+  try {
+    const [proc, orig] = await Promise.all([
+      canvasToBlob(editOut, 0.92),
+      canvasToBlob(capCanvas, 0.95),
+    ]);
+    const shot = {
+      id: Date.now() + "-" + Math.random().toString(36).slice(2, 7),
+      ts: Date.now(), processed: proc, original: orig,
+      landmarks: shotLandmarks ? shotLandmarks.map(p => ({ x: p.x, y: p.y })) : null,
+      cropX: shotCropX, cropY: shotCropY, mirror: shotMirror,
+      settings: { skinAmt, blemAmt, eyeOn, contourOn, filmPreset, filmStrength, wbCam },
+    };
+    await galleryAdd(shot);
+    await refreshGalleryThumb();
+    flashThumb();
+  } catch (e) {
+    showToast("갤러리 저장 실패: " + (e?.message || e));
+  }
+}
+
+// 찍은 사진에 보정 파이프라인 적용 (실시간이 아니라 후보정 단계)
+async function processShot() {
+  let L = null;
+  try {
+    if (landmarker) {
+      const r = landmarker.detect(capCanvas);
+      if (r?.faceLandmarks?.length) L = r.faceLandmarks[0];
+    }
+  } catch {}
+  if (!L) L = landmarksForCapture();
+  editLandmarks = L;
+  editFold = L ? foldCapsules(L) : null;
+
+  if (L) {
+    maskCanvas.width = Math.max(2, Math.round(capCanvas.width / 5));
+    maskCanvas.height = Math.max(2, Math.round(capCanvas.height / 5));
+    buildFaceMask(maskCanvas.width, maskCanvas.height, L);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, maskCanvas);
+
+  }
+  editRender();
 }
 
 // 팔자 후보 영역: 랜드마크로 넓은 캡슐만 만들고, 실제 적용 여부는
@@ -817,34 +874,11 @@ function landmarksForCapture() {
 }
 
 function enterEdit() {
-  mode = "edit";
   $("camScreen").classList.remove("on");
+  $("galleryScreen").classList.remove("on");
   $("editScreen").classList.add("on");
-  editOut.width = capCanvas.width;
-  editOut.height = capCanvas.height;
-
-  // 팔자 골 스캔: 정지 사진 재인식을 먼저 시도하고, 실패하면 촬영 순간 랜드마크로 대체
-  editFold = null;
-  let EL = null;
-  try {
-    const r = landmarker.detectForVideo(capCanvas, performance.now() + 1);
-    EL = r.faceLandmarks?.[0] ?? null;
-  } catch (e) { EL = null; }
-  if (!EL) EL = landmarksForCapture();
-  if (EL) {
-    try {
-      editFold = foldCapsules(EL);
-      // 찍힌 사진 기준의 마스크로 교체 (주름의 입술·눈썹 차단 게이트가 이 마스크를 씀)
-      maskCanvas.width = Math.max(2, Math.round(capCanvas.width / 5));
-      maskCanvas.height = Math.max(2, Math.round(capCanvas.height / 5));
-      buildFaceMask(maskCanvas.width, maskCanvas.height, EL);
-      gl.activeTexture(gl.TEXTURE1);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, maskCanvas);
-    } catch (e) { editFold = null; }
-  }
   const wr = $("wrinkle").closest(".row");
   if (wr) wr.style.opacity = editFold ? "1" : "0.4";
-  if (!editFold) showToast("얼굴을 찾지 못해 주름 완화를 쓸 수 없어요");
   editRender();
 }
 
@@ -852,8 +886,25 @@ function editRender() {
   if (!glOK) { editCtx.drawImage(capCanvas, 0, 0); return; }
   glCanvas.width = capCanvas.width;
   glCanvas.height = capCanvas.height;
+  const L = editLandmarks;
+  const faceW = L ? Math.abs(L[454].x - L[234].x) * capCanvas.width : 0;
+  // 플래시는 얼굴을 광원 중심으로 잡는다 (없으면 화면 중앙)
+  let fc = [0.5, 0.45], fr = 0.55;
+  if (L) {
+    const cx = (L[234].x + L[454].x) / 2, cy = (L[10].y + L[152].y) / 2;
+    fc = [cx, cy];
+    fr = Math.max(0.25, Math.abs(L[454].x - L[234].x) * 1.9);
+  }
   drawGL(capCanvas, {
     srcW: capCanvas.width, srcH: capCanvas.height,
+    radius: Math.max(2.5, faceW * 0.030),
+    smooth: (skinOn && L) ? skinAmt : 0,
+    blemish: (blemishOn && L) ? blemAmt : 0,
+    eye: (eyeOn && L) ? 0.55 : 0,
+    warp: contourOn && !!L,
+    lens: LENS_MAP[focal],
+    flash: S.flash ? S.flash.value / 100 : 0,
+    flashC: fc, flashR: fr,
     film: S.film.value / 100,
     fm: FILM_PRESETS[filmPreset],
     fold: editFold,
@@ -863,18 +914,103 @@ function editRender() {
     sat: S.sat.value / 100,
     rgb: [S.rGain.value / 100, S.gGain.value / 100, S.bGain.value / 100],
     wb: wbValue,
+    time: 0.5,
   });
   editCtx.drawImage(glCanvas, 0, 0);
 }
 
 $("retakeBtn").addEventListener("click", () => {
-  if (video.videoWidth) {
-    maskCanvas.width = warpCanvas.width;
-    maskCanvas.height = warpCanvas.height;
-    maskDirty = true;
-  }
-  mode = "cam";
   $("editScreen").classList.remove("on");
+  openGallery();
+});
+
+let galleryURLs = [];
+function revokeGallery() { galleryURLs.forEach(u => URL.revokeObjectURL(u)); galleryURLs = []; }
+
+async function refreshGalleryThumb() {
+  try {
+    const all = await galleryAll();
+    const btn = $("galleryBtn");
+    if (!all.length) { btn.innerHTML = '<span id="thumbEmpty">▤</span>'; return; }
+    const u = URL.createObjectURL(all[0].processed);
+    btn.innerHTML = "";
+    const im = new Image();
+    im.onload = () => URL.revokeObjectURL(u);
+    im.src = u;
+    btn.appendChild(im);
+  } catch {}
+}
+function flashThumb() {
+  const b = $("galleryBtn");
+  b.classList.remove("pop"); void b.offsetWidth; b.classList.add("pop");
+  showToast("갤러리에 저장했어요");
+}
+
+async function openGallery() {
+  mode = "gallery";
+  $("camScreen").classList.remove("on");
+  $("editScreen").classList.remove("on");
+  $("galleryScreen").classList.add("on");
+  const grid = $("galGrid");
+  revokeGallery();
+  grid.innerHTML = "";
+  let all = [];
+  try { all = await galleryAll(); } catch {}
+  $("galEmpty").classList.toggle("hide", all.length > 0);
+  $("galCount").textContent = all.length ? all.length + "장" : "";
+  for (const shot of all) {
+    const url = URL.createObjectURL(shot.processed);
+    galleryURLs.push(url);
+    const cell = document.createElement("div");
+    cell.className = "gal-cell";
+    const im = document.createElement("img");
+    im.src = url;
+    im.addEventListener("click", () => openShot(shot));
+    const del = document.createElement("button");
+    del.className = "gal-del"; del.textContent = "✕";
+    del.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      await galleryDel(shot.id);
+      await refreshGalleryThumb();
+      openGallery();
+    });
+    cell.appendChild(im); cell.appendChild(del);
+    grid.appendChild(cell);
+  }
+}
+
+// 갤러리에서 사진을 열면 원본을 다시 불러 보정 파이프라인을 재적용
+async function openShot(shot) {
+  try {
+    const bmp = await createImageBitmap(shot.original);
+    capCanvas.width = bmp.width; capCanvas.height = bmp.height;
+    capCtx.drawImage(bmp, 0, 0);
+    bmp.close?.();
+    editLandmarks = shot.landmarks || null;
+    shotLandmarks = shot.landmarks || null;
+    shotCropX = shot.cropX ?? 1; shotCropY = shot.cropY ?? 1;
+    shotMirror = shot.mirror ?? true;
+    editFold = editLandmarks ? foldCapsules(editLandmarks) : null;
+    if (editLandmarks) {
+      maskCanvas.width = Math.max(2, Math.round(capCanvas.width / 5));
+      maskCanvas.height = Math.max(2, Math.round(capCanvas.height / 5));
+      buildFaceMask(maskCanvas.width, maskCanvas.height, editLandmarks);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, maskCanvas);
+    }
+    editOut.width = capCanvas.width; editOut.height = capCanvas.height;
+    mode = "edit";
+    enterEdit();
+  } catch (e) {
+    showToast("사진을 열 수 없어요");
+  }
+}
+
+$("galleryBtn").addEventListener("click", openGallery);
+$("galBack").addEventListener("click", () => {
+  revokeGallery();
+  mode = "cam";
+  $("galleryScreen").classList.remove("on");
   $("camScreen").classList.add("on");
 });
 
@@ -883,13 +1019,15 @@ function photoName() {
   return "film-cam_" + t.getHours() + "시" + t.getMinutes() + "분" + t.getSeconds() + "초.jpg";
 }
 
-$("saveBtn").addEventListener("click", () => {
+$("saveBtn").addEventListener("click", async () => {
   editRender();
-  const a = document.createElement("a");
-  a.href = editOut.toDataURL("image/jpeg", 0.92);   // 고품질 JPEG (PNG 대비 용량 1/5)
-  a.download = photoName();
-  a.click();
-  showToast("저장했어요");
+  try {
+    const blob = await canvasToBlob(editOut, 0.92);
+    if (!blob) { showToast("이미지 생성 실패"); return; }
+    showToast(await saveToDevice(blob, photoName()));
+  } catch (e) {
+    showToast("저장 실패: " + (e?.message || e));
+  }
 });
 
 // 공유: 안드로이드 공유 시트로 카톡·인스타 등에 바로 전송
@@ -906,6 +1044,125 @@ $("shareBtn").addEventListener("click", () => {
     }
   }, "image/jpeg", 0.92);
 });
+
+/* ===== 설정 유지 (앱을 껐다 켜도 마지막 선택을 기억) ===== */
+const SET_KEY = "filmcam.settings.v1";
+function saveSettings() {
+  try {
+    localStorage.setItem(SET_KEY, JSON.stringify({
+      skinAmt, blemAmt, eyeOn, contourOn, filmPreset, filmStrength,
+      focal, ratio, ssChoice, wbCam, flashMode,
+    }));
+  } catch {}
+}
+function loadSettings() {
+  let s = null;
+  try { s = JSON.parse(localStorage.getItem(SET_KEY) || "null"); } catch {}
+  if (!s) return;
+  if (typeof s.skinAmt === "number") { skinAmt = s.skinAmt; skinOn = skinAmt > 0; }
+  if (typeof s.blemAmt === "number") { blemAmt = s.blemAmt; blemishOn = blemAmt > 0; }
+  if (typeof s.eyeOn === "boolean") eyeOn = s.eyeOn;
+  if (typeof s.contourOn === "boolean") contourOn = s.contourOn;
+  if (typeof s.filmPreset === "number") filmPreset = s.filmPreset;
+  if (typeof s.filmStrength === "number") { filmStrength = s.filmStrength; filmOn = filmStrength > 0.005; }
+  if (typeof s.focal === "number") focal = s.focal;
+  if (typeof s.ratio === "string" && RATIOS[s.ratio]) ratio = s.ratio;
+  if (typeof s.ssChoice === "string") ssChoice = s.ssChoice;
+  if (typeof s.wbCam === "number") wbCam = s.wbCam;
+  if (typeof s.flashMode === "string") flashMode = s.flashMode;
+  syncUIFromState();
+}
+function syncUIFromState() {
+  const pick = (bar, attr, val) => {
+    const el = $(bar); if (!el) return;
+    el.querySelectorAll(".pill").forEach(b => b.classList.toggle("on", b.dataset[attr] == val));
+  };
+  pick("skinSeg", "skin", Math.round(skinAmt * 100));
+  pick("ssBar", "ss", ssChoice);
+  pick("ratioBar", "ratio", ratio);
+  pick("focalBar", "focal", focal);
+  pick("filmPresets", "fp", filmPreset);
+  const wbKey = Object.keys(WB_CAM).find(k => WB_CAM[k] === wbCam) || "auto";
+  pick("wbBar", "wbc", wbKey);
+  $("blemAmt").value = Math.round(blemAmt * 100);
+  $("blemAmtVal").textContent = Math.round(blemAmt * 100);
+  $("filmStrength").value = Math.round(filmStrength * 100);
+  $("filmStrengthVal").textContent = Math.round(filmStrength * 100);
+  $("tgEye").classList.toggle("on", eyeOn); $("tgEye").textContent = eyeOn ? "켜짐" : "꺼짐";
+  $("tgContour").classList.toggle("on", contourOn); $("tgContour").textContent = contourOn ? "켜짐" : "꺼짐";
+  $("ssTag").textContent = ssChoice === "auto" ? "A" : ssChoice;
+  $("ratioTag").textContent = ratio;
+  $("focalTag").textContent = focal;
+  $("filmTag").textContent = filmPreset + 1;
+  $("flashTag").textContent = FLASH_TAG[flashMode] || "off";
+  $("flashBtn").classList.toggle("on", flashMode !== "off");
+  $("wbBtn").classList.toggle("on", wbCam !== 0);
+  $("filmBtn").classList.toggle("on", filmOn);
+}
+
+/* ===== 앱 내부 갤러리 (기기 저장소에 남는 임시 보관함) ===== */
+const DB_NAME = "filmcam", STORE = "shots";
+let dbP = null;
+function db() {
+  if (dbP) return dbP;
+  dbP = new Promise((res, rej) => {
+    const rq = indexedDB.open(DB_NAME, 1);
+    rq.onupgradeneeded = () => {
+      if (!rq.result.objectStoreNames.contains(STORE))
+        rq.result.createObjectStore(STORE, { keyPath: "id" });
+    };
+    rq.onsuccess = () => res(rq.result);
+    rq.onerror = () => rej(rq.error);
+  });
+  return dbP;
+}
+async function tx(mode, fn) {
+  const d = await db();
+  return new Promise((res, rej) => {
+    const t = d.transaction(STORE, mode);
+    const r = fn(t.objectStore(STORE));
+    t.oncomplete = () => res(r?.result);
+    t.onerror = () => rej(t.error);
+  });
+}
+async function galleryAdd(shot) { return tx("readwrite", s => s.put(shot)); }
+async function galleryAll() {
+  const d = await db();
+  return new Promise((res, rej) => {
+    const out = [];
+    const t = d.transaction(STORE, "readonly");
+    t.objectStore(STORE).openCursor(null, "prev").onsuccess = (e) => {
+      const c = e.target.result;
+      if (c) { out.push(c.value); c.continue(); } else res(out);
+    };
+    t.onerror = () => rej(t.error);
+  });
+}
+async function galleryDel(id) { return tx("readwrite", s => s.delete(id)); }
+
+function canvasToBlob(cv, q) {
+  return new Promise(r => cv.toBlob(b => r(b), "image/jpeg", q));
+}
+
+/* ===== 기기에 저장 (Capacitor 네이티브 경로) ===== */
+async function saveToDevice(blob, name) {
+  const FS = window.Capacitor?.Plugins?.Filesystem;
+  if (FS) {
+    const b64 = await new Promise(r => {
+      const fr = new FileReader();
+      fr.onload = () => r(String(fr.result).split(",")[1]);
+      fr.readAsDataURL(blob);
+    });
+    await FS.writeFile({ path: name, data: b64, directory: "DOCUMENTS", recursive: true });
+    return "기기에 저장했어요 (문서 폴더)";
+  }
+  // 웹 폴백
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+  return "저장했어요";
+}
 
 /* ===== 카메라 시작 / 전환 ===== */
 async function startStream() {
@@ -961,6 +1218,7 @@ async function startStream() {
 }
 
 $("startBtn").addEventListener("click", async () => {
+  loadSettings();
   const btn = $("startBtn");
   btn.disabled = true; btn.textContent = "준비 중…";
   try {
@@ -972,7 +1230,7 @@ $("startBtn").addEventListener("click", async () => {
         modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
         delegate: "GPU",
       },
-      runningMode: "VIDEO", numFaces: 1,
+      runningMode: "IMAGE", numFaces: 1,
     });
     await startStream();
     if (!glOK) showToast("이 기기는 GPU 처리를 지원하지 않아요");
@@ -1060,19 +1318,13 @@ function loop(ts) {
   if (ts - lastRenderTs < 31) return;   // 30fps 상한
   lastRenderTs = ts;
 
-  if (frameCount % 3 === 0) {
-    const result = landmarker.detectForVideo(video, performance.now());
-    const fresh = result.faceLandmarks?.[0] ?? null;
-    if (fresh) { lastLandmarks = fresh; lastSeen = performance.now(); maskDirty = true; }
-    else if (performance.now() - lastSeen > 5000) lastLandmarks = null;
-  }
-  frameCount++;
-
-  statusEl.classList.toggle("tracking", !!lastLandmarks);
-  statusText.textContent = lastLandmarks ? "얼굴 인식 중" : "얼굴 찾는 중…";
+  // 보정은 촬영 후에 하므로 프리뷰에서는 얼굴 인식을 돌리지 않는다.
+  // 그만큼 프레임 처리가 가벼워져 미리보기 화질과 반응이 좋아진다.
+  statusEl.classList.add("tracking");
+  statusText.textContent = "촬영 준비됨";
 
   // 프리뷰 렌더 (화각 + 화면 비율 크롭)
-  const src = camPreviewFrame();
+  const src = video;   // 후보정 방식: 프리뷰는 원본 그대로
   const srcW = src === video ? video.videoWidth : glCanvas.width;
   const srcH = src === video ? video.videoHeight : glCanvas.height;
   const { sx, sy, sw, sh } = cropRect(srcW, srcH);
@@ -1154,17 +1406,27 @@ function buildFaceMask(w, h, L) {
   // 이 골들은 '지워야 할 잡티'가 아니라 '남겨야 할 정상 굴곡'이다.
   // (주름 완화는 A 채널을 쓰므로 여기서 계속 동작한다)
   maskCtx.save();
-  maskCtx.filter = "blur(" + faceW * 0.025 + "px)";
+  maskCtx.filter = "blur(" + faceW * 0.03 + "px)";
+  maskCtx.fillStyle = "rgb(0,0,255)";
   maskCtx.strokeStyle = "rgb(0,0,255)";
   maskCtx.lineCap = "round";
-  maskCtx.lineWidth = faceW * 0.10;
-  for (const pair of [[L[129], L[61]], [L[358], L[291]]]) {
-    const a = pair[0], b = pair[1];
-    if (!a || !b) continue;
+  maskCtx.lineWidth = faceW * 0.09;
+  // 랜드마크 번호에 의존하지 않고 코 기준점(L[2])과 얼굴 폭으로 위치를 잡는다
+  const nbx = L[2].x * w, nby = L[2].y * h;
+  for (const side of [-1, 1]) {
+    const ax = nbx + side * faceW * 0.105 * w / 1;
+    const ay = nby - faceW * 0.02 * h / 1;
     maskCtx.beginPath();
-    maskCtx.moveTo(a.x * w, a.y * h);
-    maskCtx.lineTo((a.x + (b.x - a.x) * 0.40) * w, (a.y + (b.y - a.y) * 0.40) * h);
-    maskCtx.stroke();
+    maskCtx.ellipse(ax, ay, faceW * w * 0.085, faceW * w * 0.075, 0, 0, Math.PI * 2);
+    maskCtx.fill();
+    // 콧볼에서 입꼬리 쪽으로 이어지는 골도 함께 제외
+    const corner = side < 0 ? L[61] : L[291];
+    if (corner) {
+      maskCtx.beginPath();
+      maskCtx.moveTo(ax, ay);
+      maskCtx.lineTo(ax + (corner.x * w - ax) * 0.40, ay + (corner.y * h - ay) * 0.40);
+      maskCtx.stroke();
+    }
   }
   maskCtx.restore();
 
@@ -1212,3 +1474,8 @@ $("shotBtn").addEventListener("click", async () => {
     await captureHighRes();
   }
 });
+
+
+// 앱을 다시 열어도 갤러리 썸네일과 설정이 남아있게 한다
+loadSettings();
+refreshGalleryThumb();

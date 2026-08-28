@@ -111,9 +111,11 @@
     </div>
 
     <div class="shutterrow">
-      <div class="side"></div>
-      <button id="shotBtn" disabled aria-label="사진 찍기"></button>
       <div class="side"><button class="ic round" id="flipBtn" title="카메라 전환">↺</button></div>
+      <button id="shotBtn" disabled aria-label="사진 찍기"></button>
+      <div class="side">
+        <button class="thumb" id="galleryBtn" title="갤러리"><span id="thumbEmpty">▤</span></button>
+      </div>
     </div>
   </div>
 </div>
@@ -123,6 +125,7 @@
   <div class="frame-wrap"><canvas class="frame" id="editOut"></canvas></div>
   <div class="edit-panel">
     <div class="row"><label for="wrinkle">주름 완화</label><input type="range" id="wrinkle" min="0" max="100" value="50" /><output id="wrinkleVal">50</output></div>
+    <div class="row"><label for="flash">플래시</label><input type="range" id="flash" min="0" max="100" value="0" /><output id="flashVal">0</output></div>
     <div class="row"><label for="film">필름 감성</label><input type="range" id="film" min="0" max="100" value="0" /><output id="filmVal">0</output></div>
     <div class="row"><label for="sharp">선명도</label><input type="range" id="sharp" min="0" max="100" value="15" /><output id="sharpVal">15</output></div>
     <div class="row"><label for="contrast">콘트라스트</label><input type="range" id="contrast" min="50" max="150" value="100" /><output id="contrastVal">100</output></div>
@@ -137,11 +140,22 @@
     <div class="row"><label for="gGain">그린</label><input type="range" id="gGain" min="70" max="130" value="100" /><output id="gGainVal">100</output></div>
     <div class="row"><label for="bGain">블루</label><input type="range" id="bGain" min="70" max="130" value="100" /><output id="bGainVal">100</output></div>
     <div class="edit-actions">
-      <button id="retakeBtn">다시 찍기</button>
+      <button id="retakeBtn">닫기</button>
       <button id="shareBtn">공유</button>
       <button id="saveBtn">저장</button>
     </div>
   </div>
+</div>
+
+<!-- ===== 앱 내부 갤러리 ===== -->
+<div class="screen" id="galleryScreen">
+  <div class="gal-top">
+    <button class="ic" id="galBack" title="돌아가기">←</button>
+    <span class="gal-title">갤러리</span>
+    <span class="gal-count" id="galCount"></span>
+  </div>
+  <div class="gal-grid" id="galGrid"></div>
+  <div class="gal-empty" id="galEmpty">아직 찍은 사진이 없어요</div>
 </div>
 
 <div id="toast" role="status"></div>
