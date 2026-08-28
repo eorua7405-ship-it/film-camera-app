@@ -86,6 +86,7 @@ window.FaceLandmarker = { createFromOptions: async () => globalThis.__fakeLandma
 
 // 네이티브 카메라 플러그인 스텁 — NATIVE=1 이면 네이티브 경로를 태운다
 const NATIVE = process.env.NATIVE === '1';
+const SYS = process.env.SYS === '1';
 const cpLog = [];
 if (NATIVE) {
   const png1x1 = fakeFrameB64();
@@ -96,9 +97,22 @@ if (NATIVE) {
     },
     stop: async () => { cpLog.push(['stop']); },
     flip: async () => { cpLog.push(['flip']); },
-    setFlashMode: async (o) => { cpLog.push(['flash', o.flashMode]); },
+    setFlashMode: async (o) => {
+      cpLog.push(['flash', o.flashMode]);
+      // 실제 기기에서는 여기서 자바 NPE로 앱이 죽었다. 호출 자체가 금지다.
+      throw new Error('setFlashMode는 호출되면 안 됩니다 (기기 크래시 원인)');
+    },
     capture: async () => { cpLog.push(['capture']); return { value: png1x1 }; },
   }, Filesystem: { writeFile: async () => ({ uri: 'file:///x.jpg' }) } } };
+}
+if (SYS) {
+  window.Capacitor = window.Capacitor || { isNativePlatform: () => true, Plugins: {} };
+  window.Capacitor.Plugins = window.Capacitor.Plugins || {};
+  window.Capacitor.Plugins.Camera = {
+    getPhoto: async (o) => { cpLog.push(['getPhoto', o.direction, o.quality]);
+      return { base64String: fakeFrameB64() }; },
+  };
+  window.Capacitor.Plugins.Filesystem = { writeFile: async () => ({ uri: 'file:///x.jpg' }) };
 }
 function fakeFrameB64() {
   return createCanvas(1080, 1440).toDataURL('image/jpeg').split(',')[1];
@@ -201,7 +215,7 @@ setTimeout(() => {
       check('카메라 시작', doc.getElementById('camTop').style.display === 'flex', '상단바 표시');
       try { await window.__testCapture(); }
       catch (e) { check('촬영 예외', false, e.message); }
-      const editCall = calls[calls.length - 1] || {};
+      const editCall = [...calls].reverse().find(c => c.smooth !== undefined) || {};
       check('촬영→보정 호출', calls.length > 0, calls.length + '회 렌더');
       check('피부결 전달', (editCall.smooth ?? 0) > 0, 'smooth=' + editCall.smooth);
       check('잡티 전달', (editCall.blemish ?? 0) > 0, 'blemish=' + editCall.blemish);
@@ -212,7 +226,22 @@ setTimeout(() => {
       // processShot 단계별 추적
       console.log('  [진단] landmarker =', typeof window.__fakeLandmarker);
       console.log('  [진단] drawGL 호출 인자들 =', JSON.stringify(calls.map(c => Object.keys(c))));
-      if (NATIVE) { click($('tgCamMode')); await new Promise(r => setTimeout(r, 400)); }
+      if (NATIVE) {
+        window.localStorage.removeItem('filmcam.settings.v1');
+        // 웹 → 시스템 → 네이티브 순환이므로 두 번 눌러 네이티브까지 간다
+        // 시스템 카메라가 없는 환경에서는 웹 → 네이티브로 바로 넘어간다
+        click($('tgCamMode')); await new Promise(r => setTimeout(r, 600));
+        check('setFlashMode 미호출', !cpLog.some(l => l[0] === 'flash'),
+          '크래시 유발 호출 없음');
+        check('네이티브 모드 진입', doc.getElementById('tgCamMode').textContent === '네이티브',
+          doc.getElementById('tgCamMode').textContent);
+      }
+      if (SYS) { click($('tgCamMode')); await new Promise(r => setTimeout(r, 400)); }
+      if (SYS) {
+        check('시스템 모드 전환', doc.getElementById('tgCamMode').textContent === '시스템',
+          doc.getElementById('tgCamMode').textContent);
+        await window.__testCapture();   // 전환 후 다시 촬영
+      }
       if (NATIVE && process.env.CRASH === '1') {
         check('크래시 시 폴백', /웹/.test(doc.getElementById('statusText').textContent), '웹 방식으로 전환됨');
         check('촬영 계속 가능', doc.getElementById('editOut').width > 300,
@@ -236,6 +265,20 @@ setTimeout(() => {
         Math.max(...(window.__detectSizes[0] || [9999])) <= 1024,
         '검출 입력 크기 ' + JSON.stringify(window.__detectSizes && window.__detectSizes[0]));
       // 갤러리에서 사진을 열면 편집 화면 진단이 갱신된다
+      if (SYS) {
+        check('시스템 카메라 호출', cpLog.some(l => l[0] === 'getPhoto'), '기본 카메라 앱 실행');
+        check('시스템 모드 표시', /시스템카메라/.test(doc.getElementById('statusText').textContent),
+          doc.getElementById('statusText').textContent);
+      }
+      // 실시간 필름 프리뷰: 필름이 켜져 있으면 프리뷰가 GL을 통과해야 한다
+      calls.length = 0;
+      window.__testLoop && window.__testLoop(performance.now() + 5000);
+      const previewCall = calls.find(c => c.film !== undefined && c.smooth === undefined);
+      // 네이티브 모드는 프리뷰를 네이티브 뷰가 직접 그리므로 GL을 타지 않는다
+      check('실시간 필름 프리뷰', NATIVE ? true : (!!previewCall && previewCall.film > 0),
+        previewCall ? 'film=' + previewCall.film : 'GL 통과 안 함');
+      check('프리뷰는 얼굴연산 없음', !previewCall || !previewCall.smooth,
+        '피부 보정은 프리뷰에서 제외');
       const all0 = await window.__testGalleryAll();
       if (all0[0]) { await window.__testOpenShot(all0[0]); }
       check('갤러리 재편집 보정 유지', /얼굴 인식 O/.test(doc.getElementById('editDiag').textContent),
@@ -243,7 +286,7 @@ setTimeout(() => {
       check('편집 진단 표시', /얼굴 인식/.test(doc.getElementById('editDiag').textContent),
         doc.getElementById('editDiag').textContent);
       const shots = await window.__testGalleryAll();
-      check('갤러리 자동저장', shots.length === 1, shots.length + '장');
+      check('갤러리 자동저장', shots.length === (SYS ? 2 : 1), shots.length + '장');
     } catch (e) {
       check('촬영 흐름', false, e.message);
     }

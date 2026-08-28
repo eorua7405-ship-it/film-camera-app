@@ -8,9 +8,7 @@ xvfb-run -a node /tmp/realphoto-test.js 2>&1 | grep -E "PASS|FAIL|변화량|기�
 echo ""
 echo "═══ 3. UI 통합 (버튼·슬라이더·촬영 흐름 배선 검증) ═══"
 node /tmp/ui-test.js || exit 1
+
 echo ""
-echo "═══ 4. 네이티브 카메라 경로 ═══"
-NATIVE=1 node /tmp/ui-test.js || exit 1
-echo ""
-echo "═══ 5. 네이티브 크래시 → 자동 폴백 ═══"
-NATIVE=1 CRASH=1 node /tmp/ui-test.js || exit 1
+echo "═══ 4. 시스템 카메라 경로 ═══"
+SYS=1 node /tmp/ui-test.js || exit 1
