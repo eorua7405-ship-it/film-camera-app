@@ -1,4 +1,4 @@
-const BUILD = "v15";
+const BUILD = "v18";
 
 // 어떤 오류든 화면에 보이게 한다. 원인을 모른 채 앱이 멈추는 상황을 막는다.
 window.addEventListener("error", (e) => {
@@ -128,25 +128,27 @@ $("tgEye").addEventListener("click", (e) => {
 });
 $("tgCamMode").addEventListener("click", async () => {
   const b = $("tgCamMode");
-  const order = ["web", "system", "native"];
+  const order = ["web", "fullnative", "system"];
   let next = order[(order.indexOf(camMode) + 1) % order.length];
-  if (next === "system" && !SysCam()) next = "native";
-  if (next === "native" && !CP()) next = "web";
+  if (next === "fullnative" && !FilmCam()) next = "system";
+  if (next === "system" && !SysCam()) next = "web";
 
-  if (camMode === "native" && next !== "native") await stopNative();
+  if (camMode === "fullnative" && next !== "fullnative") await stopFullNative();
 
-  if (next === "native") {
+  if (next === "fullnative") {
     if (video.srcObject) { video.srcObject.getTracks().forEach(t => t.stop()); video.srcObject = null; }
+    camMode = "fullnative";   // 브릿지 신호가 통과하려면 모드를 먼저 확정해야 한다
     let ok = false;
-    try { ok = await startNative(); } catch { ok = false; }
-    if (!ok) { next = "web"; await startStream(); showToast("네이티브를 쓸 수 없어 웹으로 돌아왔어요"); }
-    else { glOK = initGLOnce(); showToast("앱 안에서 네이티브 화질로 촬영해요"); }
-  } else if (camMode === "native") {
+    try { ok = await startFullNative(); } catch { ok = false; }
+    if (!ok) { next = "web"; camMode = "web"; await startStream(); showToast("완전 네이티브를 쓸 수 없어 웹으로 돌아왔어요"); }
+    else { glOK = initGLOnce(); showToast("완전 네이티브 · 화면을 탭하면 초점이 맞아요"); }
+  } else if (isFullNative()) {
     await startStream();
   }
 
   camMode = next;
-  b.textContent = camMode === "system" ? "시스템" : camMode === "native" ? "네이티브" : "웹";
+  document.body.classList.toggle("fullnative", camMode === "fullnative");
+  b.textContent = camMode === "system" ? "시스템" : camMode === "fullnative" ? "네이티브" : "웹";
   b.classList.toggle("on", camMode !== "web");
   if (camMode === "system") showToast("셔터를 누르면 폰 기본 카메라가 열려요");
   if (camMode === "web") showToast("앱 안에서 바로 촬영해요");
@@ -167,6 +169,7 @@ $("filmStrength").addEventListener("input", (e) => {
   $("filmStrengthVal").textContent = e.target.value;
   filmOn = filmStrength > 0.005;
   $("filmBtn").classList.toggle("on", filmOn);
+  pushFilmToNative();
   saveSettings();
 });
 
@@ -184,10 +187,11 @@ $("flashBtn").addEventListener("click", async () => {
   saveSettings();
 });
 function hasTorch() {
-  if (nativeCam) return false;   // 네이티브 모드에서는 LED를 쓰지 않는다 (플러그인 버그)
+  if (isFullNative()) return true;   // CameraX가 LED를 안전하게 제어
   try { return !!track()?.getCapabilities?.().torch; } catch { return false; }
 }
 async function setTorch(on) {
+  if (isFullNative()) { try { await FilmCam().setTorch({ on }); } catch {} return; }
   if (!hasTorch()) return false;
   try { await track().applyConstraints({ advanced: [{ torch: on }] }); return true; }
   catch { return false; }
@@ -207,7 +211,8 @@ $("ratioBar").addEventListener("click", (e) => {
   $("ratioBar").querySelectorAll(".pill").forEach(x => x.classList.remove("on"));
   b.classList.add("on"); ratio = b.dataset.ratio;
   $("ratioTag").textContent = ratio;
-  relayoutNative();
+  relayoutFullNative();
+  relayoutFullNative();
   saveSettings();
 });
 $("focalBar").addEventListener("click", (e) => {
@@ -222,12 +227,14 @@ $("filmPresets").addEventListener("click", (e) => {
   const b = e.target.closest(".pill"); if (!b) return;
   $("filmPresets").querySelectorAll(".pill").forEach(x => x.classList.remove("on"));
   b.classList.add("on"); filmPreset = Number(b.dataset.fp);
+  pushFilmToNative();
   $("filmTag").textContent = filmPreset + 1;
 });
 $("wbBar").addEventListener("click", (e) => {
   const b = e.target.closest(".pill"); if (!b) return;
   $("wbBar").querySelectorAll(".pill").forEach(x => x.classList.remove("on"));
   b.classList.add("on"); wbCam = WB_CAM[b.dataset.wbc];
+  pushFilmToNative();
   $("wbBtn").classList.toggle("on", wbCam !== 0);
   saveSettings();
 });
@@ -236,7 +243,9 @@ $("wbBar").addEventListener("click", (e) => {
 const RATIOS = { "1:1": 1, "3:4": 3 / 4, "9:16": 9 / 16 };
 let ratio = "3:4";
 function cropRect(sw0, sh0) {
-  const cf = hwZoom ? 1 : 28 / focal;
+  // 네이티브는 렌즈 줌으로 이미 당겨져 있으므로 남은 배율만 크롭한다
+  const cf = isFullNative() ? Math.min(1, (28 / focal) * nativeZoom)
+                                        : (hwZoom ? 1 : 28 / focal);
   let sw = sw0 * cf, sh = sh0 * cf;
   const target = RATIOS[ratio];
   if (sw / sh > target) sw = sh * target; else sh = sw / target;
@@ -247,7 +256,7 @@ function cropRect(sw0, sh0) {
 function track() { return video.srcObject?.getVideoTracks()[0]; }
 
 async function applyFocal() {
-  if (nativeCam) return;   // 화각은 촬영 후 크롭으로 처리
+  if (isFullNative()) { await applyNativeZoom(); return; }
   hwZoom = false;
   const t = track(); const caps = t?.getCapabilities?.();
   if (caps && caps.zoom) {
@@ -257,7 +266,7 @@ async function applyFocal() {
 }
 
 async function applyShutter() {
-  if (nativeCam) return;
+  if (isFullNative()) return;
   const t = track(); const caps = t?.getCapabilities?.();
   if (ssChoice === "auto") {
     if (caps?.exposureMode?.includes("continuous"))
@@ -283,7 +292,9 @@ function reportCaps() {
   let caps = {};
   try { caps = track()?.getCapabilities?.() || {}; } catch {}
   const parts = [BUILD];
-  parts.push(nativeCam ? "네이티브" : (video.videoWidth + "×" + video.videoHeight));
+  parts.push(camMode === "fullnative" ? "네이티브레이어"
+           : camMode === "system" ? "시스템카메라"
+           : (video.videoWidth + "×" + video.videoHeight));
   parts.push(caps.focusMode ? "초점 O" : "초점 X");
   parts.push(caps.torch ? "LED O" : "LED X");
   if (imageCapture) parts.push("고화질 촬영 O");
@@ -291,6 +302,13 @@ function reportCaps() {
 }
 
 function tryFocus(m, nx, ny) {
+  // 완전 네이티브 레이어는 CameraX가 초점을 직접 제어한다
+  if (isFullNative()) {
+    // 완전 네이티브: CameraX의 startFocusAndMetering으로 실제 재초점
+    nativeFocus(nx ?? 0.5, ny ?? 0.5);
+    return true;
+  }
+  if (isFullNative()) return true;   // 초점은 네이티브 레이어가 처리
   const t = track();
   if (!t?.getCapabilities) return false;
   let caps = {};
@@ -830,7 +848,21 @@ async function captureHighRes() {
   // 가능하면 프리뷰 스트림이 아니라 '센서 원본 정지 사진'을 받아 처리한다.
   // 프리뷰는 대역폭 때문에 압축·축소되지만, 정지 사진은 센서 해상도 그대로다.
   let src = video, sw0 = video.videoWidth, sh0 = video.videoHeight;
-  if (camMode === "system") {
+  if (isFullNative()) {
+    try {
+      const res = await FilmCam().capture();
+      const img = new Image();
+      await new Promise((ok, no) => {
+        img.onload = ok; img.onerror = () => no(new Error("사진을 읽을 수 없어요"));
+        img.src = "data:image/jpeg;base64," + res.value;
+      });
+      src = img; sw0 = img.naturalWidth; sh0 = img.naturalHeight;
+      systemShot = true;   // 네이티브가 이미 처리한 원본 — GL 전처리·미러링 생략
+    } catch (e) {
+      showToast("촬영 실패: " + String(e?.message || e).slice(0, 40));
+      return;
+    }
+  } else if (camMode === "system") {
     try {
       const img = await shootWithSystemCamera();
       src = img; sw0 = img.naturalWidth; sh0 = img.naturalHeight;
@@ -840,16 +872,8 @@ async function captureHighRes() {
       if (!/cancel/i.test(msg)) showToast("촬영 실패: " + msg.slice(0, 50));
       return;
     }
-  } else if (camMode === "native" && nativeCam) {
-    try {
-      const img = await captureNative();
-      src = img; sw0 = img.naturalWidth; sh0 = img.naturalHeight;
-    } catch (e) {
-      showToast("촬영 실패: " + (e?.message || e));
-      return;
-    }
   }
-  if (!nativeCam && imageCapture) {
+  if (!isFullNative() && imageCapture) {
     try {
       const blob = await imageCapture.takePhoto();
       const bmp = await createImageBitmap(blob);
@@ -881,7 +905,7 @@ async function captureHighRes() {
   const cw = Math.round(sw), ch = Math.round(sh);
   capCanvas.width = cw; capCanvas.height = ch;
   capCtx.save();
-  if (facing === "user" && !nativeCam && !systemShot) { capCtx.translate(cw, 0); capCtx.scale(-1, 1); }
+  if (facing === "user" && !isFullNative() && !systemShot) { capCtx.translate(cw, 0); capCtx.scale(-1, 1); }
   capCtx.drawImage((glOK && !systemShot) ? glCanvas : src, sx, sy, sw, sh, 0, 0, cw, ch);
   capCtx.restore();
 
@@ -1014,7 +1038,7 @@ function landmarksForCapture() {
 }
 
 function enterEdit() {
-  stopNative();
+  if (isFullNative()) stopFullNative();
   $("camScreen").classList.remove("on");
   $("galleryScreen").classList.remove("on");
   $("editScreen").classList.add("on");
@@ -1103,7 +1127,7 @@ function flashThumb() {
 
 async function openGallery() {
   mode = "gallery";
-  await stopNative();
+  if (isFullNative()) await stopFullNative();
   $("camScreen").classList.remove("on");
   $("editScreen").classList.remove("on");
   $("galleryScreen").classList.add("on");
@@ -1169,7 +1193,7 @@ $("galBack").addEventListener("click", async () => {
   mode = "cam";
   $("galleryScreen").classList.remove("on");
   $("camScreen").classList.add("on");
-  if (CP()) await startNative();
+  if (isFullNative()) await startFullNative();
 });
 
 function photoName() {
@@ -1228,7 +1252,7 @@ function loadSettings() {
   if (typeof s.ssChoice === "string") ssChoice = s.ssChoice;
   if (typeof s.wbCam === "number") wbCam = s.wbCam;
   if (typeof s.flashMode === "string") flashMode = s.flashMode;
-  if (["web", "system", "native"].includes(s.camMode)) camMode = s.camMode === "native" ? "web" : s.camMode;
+  if (["web", "system"].includes(s.camMode)) camMode = s.camMode;
   syncUIFromState();
 }
 function syncUIFromState() {
@@ -1262,16 +1286,21 @@ function syncUIFromState() {
 // 화면 크기가 바뀌면 네이티브 프리뷰를 다시 맞춘다
 let relayoutTimer = null;
 window.addEventListener("resize", () => {
-  if (!nativeCam) return;
+  if (isFullNative()) {
+    clearTimeout(relayoutTimer);
+    relayoutTimer = setTimeout(() => { relayoutFullNative().catch(() => {}); }, 300);
+    return;
+  }
+  if (!isFullNative()) return;
   clearTimeout(relayoutTimer);
   relayoutTimer = setTimeout(() => { relayoutNative().catch(() => {}); }, 300);
 });
 
 // 앱이 백그라운드로 갔다 오면 프리뷰를 재개한다
 document.addEventListener("visibilitychange", async () => {
-  if (document.hidden) { if (nativeCam) await stopNative(); return; }
-  if (mode === "cam" && nativeCam) {
-    try { await startNative(); } catch { await startStream(); }
+  if (document.hidden) { if (isFullNative()) await stopFullNative(); return; }
+  if (mode === "cam" && isFullNative()) {
+    try { await startFullNative(); } catch { await startStream(); }
   }
 });
 
@@ -1343,8 +1372,90 @@ async function saveToDevice(blob, name) {
    WebView의 getUserMedia는 압축·축소된 스트림만 주고 초점 제어도 막혀 있다.
    네이티브 프리뷰는 WebView '뒤'에 그려지므로, 미리보기 영역만 투명하게 뚫어준다.
    실시간 보정을 후보정으로 옮겼기 때문에 프레임을 JS로 가져올 필요가 없어졌다. */
-let nativeCam = false, started = false;
+let started = false;
+// 완전 네이티브 모드: CameraX 레이어가 미리보기를 그리고 있는 상태
+function isFullNative() { return camMode === "fullnative"; }
 let camMode = "web";   // "web" | "system"
+// 미리보기가 놓일 화면상의 사각형 (선택한 비율에 맞춰 레터박스)
+// 네이티브 레이어는 이 좌표로 정확히 배치된다
+function stageRect() {
+  const el = document.querySelector('.stagewrap');
+  const r = el.getBoundingClientRect();
+  const target = RATIOS[ratio];
+  let w = r.width, h = r.height;
+  if (w / h > target) w = h * target; else h = w / target;
+  return {
+    x: Math.round(r.left + (r.width - w) / 2),
+    y: Math.round(r.top + (r.height - h) / 2),
+    width: Math.round(w), height: Math.round(h),
+  };
+}
+
+function FilmCam() { return window.Capacitor?.Plugins?.FilmCamera || null; }
+
+// 필름 프리셋을 네이티브 GPU로 전달 (신호만 보내고 연산은 네이티브가 수행)
+async function pushFilmToNative() {
+  const fc = FilmCam();
+  if (!fc || camMode !== "fullnative") return;
+  const p = FILM_PRESETS[filmPreset] || FILM_PRESETS[0];
+  try {
+    await fc.setFilm({
+      strength: filmOn ? filmStrength : 0,
+      toneScale: p.tone[0], toneLift: p.tone[1], sat: p.sat,
+      hiR: p.hi[0], hiG: p.hi[1], hiB: p.hi[2],
+      shR: p.sh[0], shG: p.sh[1], shB: p.sh[2],
+      grain: p.grain, vig: p.vig, wb: wbCam,
+    });
+  } catch (e) { /* 신호 전달 실패는 화면만 영향 */ }
+}
+
+// 미리보기 영역이 바뀌면 네이티브 레이어도 같은 자리로 옮긴다
+async function relayoutFullNative() {
+  const fc = FilmCam();
+  if (!fc || camMode !== "fullnative") return;
+  const r = stageRect();
+  if (!(r.width > 20 && r.height > 20)) return;
+  try { await fc.setLayout({ x: r.x, y: r.y, width: r.width, height: r.height }); }
+  catch { try { await startFullNative(); } catch {} }
+}
+
+async function startFullNative() {
+  const fc = FilmCam();
+  if (!fc) return false;
+  let r = stageRect();
+  for (let i = 0; i < 12 && !(r.width > 20 && r.height > 20); i++) {
+    await new Promise(res => requestAnimationFrame(() => setTimeout(res, 30)));
+    r = stageRect();
+  }
+  if (!(r.width > 20 && r.height > 20)) return false;
+  if (!(await ensureCameraPermission())) { showToast("카메라 권한이 필요해요"); return false; }
+  try {
+    await fc.start({ x: r.x, y: r.y, width: r.width, height: r.height,
+                     position: facing === "user" ? "front" : "rear" });
+    document.body.classList.add("fullnative");
+    await pushFilmToNative();
+    return true;
+  } catch (e) {
+    showToast("네이티브 레이어 시작 실패: " + String(e?.message || e).slice(0, 40));
+    document.body.classList.remove("fullnative");
+    return false;
+  }
+}
+
+async function stopFullNative() {
+  const fc = FilmCam();
+  document.body.classList.remove("fullnative");
+  if (!fc) return;
+  try { await fc.stop(); } catch {}
+}
+
+// 탭 초점 — 이 레이어를 만든 가장 큰 이유
+async function nativeFocus(nx, ny) {
+  const fc = FilmCam();
+  if (!fc || camMode !== "fullnative") return false;
+  try { await fc.focus({ x: nx, y: ny }); return true; } catch { return false; }
+}
+
 function SysCam() { return window.Capacitor?.Plugins?.Camera || null; }
 
 // 시스템 카메라로 한 장 찍어 이미지로 받아온다
@@ -1370,21 +1481,8 @@ async function shootWithSystemCamera() {
   return img;
 }
 
-function CP() { return window.Capacitor?.Plugins?.CameraPreview || null; }
+function FilmCam() { return window.Capacitor?.Plugins?.FilmCamera || null; }
 
-// 미리보기가 놓일 화면상의 사각형 (선택한 비율에 맞춰 레터박스)
-function stageRect() {
-  const el = document.querySelector(".stagewrap");
-  const r = el.getBoundingClientRect();
-  const target = RATIOS[ratio];
-  let w = r.width, h = r.height;
-  if (w / h > target) w = h * target; else h = w / target;
-  return {
-    x: Math.round(r.left + (r.width - w) / 2),
-    y: Math.round(r.top + (r.height - h) / 2),
-    width: Math.round(w), height: Math.round(h),
-  };
-}
 
 // 네이티브 카메라가 기기에서 앱을 죽이는 경우를 대비한 자가복구 장치.
 // 시도 직전에 표시를 남기고, 성공하면 지운다.
@@ -1411,83 +1509,25 @@ async function ensureCameraPermission() {
   }
 }
 
-async function startNative() {
-  const cp = CP();
-  if (!cp) return false;
-  if (nativeBlocked) { showToast("지난번 네이티브 카메라에서 문제가 있어 웹 방식으로 실행해요"); return false; }
-  if (!isNativeApp()) return false;
 
-  // 레이아웃이 잡힐 때까지 잠깐 기다린다 (0 크기로 열면 기기에 따라 앱이 죽는다)
-  let r = stageRect();
-  for (let i = 0; i < 12 && !(r.width > 20 && r.height > 20); i++) {
-    await new Promise(res => requestAnimationFrame(() => setTimeout(res, 30)));
-    r = stageRect();
-  }
-  if (!(r.width > 20 && r.height > 20)) { showToast("화면 준비가 안 돼 웹 방식으로 실행해요"); return false; }
 
-  if (!(await ensureCameraPermission())) { showToast("카메라 권한이 필요해요"); return false; }
-
+let nativeZoom = 1;
+// 화각: 렌즈 줌으로 당길 수 있는 만큼 당기고, 모자란 만큼만 촬영 후 크롭한다
+async function applyNativeZoom() {
+  const fc = FilmCam();
+  if (!fc || camMode !== "fullnative") { nativeZoom = 1; return; }
   try {
-    try { localStorage.setItem(NATIVE_FLAG, "1"); } catch {}
-    await stopNative();
-    // 옵션은 문서화된 최소 항목만 사용한다. 기기별로 지원되지 않는 옵션이
-    // 네이티브 크래시를 일으킨 사례가 있어 실험적 옵션은 넣지 않는다.
-    // toBack:true는 WebView 전체를 투명하게 만드는데, 이 과정이 기기에 따라
-    // 앱을 종료시키는 것으로 보인다. 투명화를 쓰지 않고 미리보기 영역 '위에'
-    // 카메라 뷰를 얹는다. UI(상단바·하단바)는 그 영역 밖에 있으므로 가려지지 않는다.
-    await cp.start({
-      position: facing === "user" ? "front" : "rear",
-      x: r.x, y: r.y, width: r.width, height: r.height,
-      toBack: false,
-      disableAudio: true,
-    });
-    nativeCam = true;
-    // 여기까지 살아남았으면 안전하다고 보고 표시를 지운다
-    setTimeout(() => { try { localStorage.removeItem(NATIVE_FLAG); } catch {} }, 3000);
-    return true;
-  } catch (e) {
-    try { localStorage.removeItem(NATIVE_FLAG); } catch {}
-    nativeCam = false;
-    document.body.classList.remove("native");
-    showToast("네이티브 카메라 실패 — 웹 방식으로 전환해요");
-    return false;
-  }
+    const res = await fc.setZoom({ ratio: focal / 28 });
+    nativeZoom = res?.zoom || 1;
+  } catch { nativeZoom = 1; }
 }
 
-async function stopNative() {
-  const cp = CP();
-  if (!cp) return;
-  try { await cp.stop(); } catch {}
-  nativeCam = false;
-  document.body.classList.remove("native");
-}
 
-async function applyNativeFlash() {
-  // 의도적으로 아무 것도 하지 않는다.
-  // 이 플러그인의 setFlashMode는 지원 목록이 없는 카메라에서 앱을 죽인다(자바 NPE).
-  // 네이티브 모드에서는 화면 플래시를 쓰고, LED가 필요하면 시스템 카메라 모드를 사용한다.
-  return;
-}
 
 // 네이티브 프리뷰를 현재 비율/위치에 다시 맞춘다
-async function relayoutNative() {
-  if (!nativeCam) return;
-  await startNative();
-}
+
 
 // 네이티브 촬영: 센서 원본 JPEG을 받아 캔버스로 옮긴다
-async function captureNative() {
-  const cp = CP();
-  const res = await cp.capture({ quality: 95 });
-  const b64 = res?.value;
-  if (!b64) throw new Error("촬영 결과가 비어 있어요");
-  const img = new Image();
-  await new Promise((ok, no) => {
-    img.onload = ok; img.onerror = () => no(new Error("사진을 읽을 수 없어요"));
-    img.src = "data:image/jpeg;base64," + b64;
-  });
-  return img;
-}
 
 /* ===== 카메라 시작 / 전환 ===== */
 async function startStream() {
@@ -1594,6 +1634,15 @@ $("startBtn").addEventListener("click", async () => {
 
 $("flipBtn").addEventListener("click", async () => {
   facing = (facing === "user") ? "environment" : "user";
+  if (isFullNative()) {
+    try {
+      await FilmCam().flip();
+      await pushFilmToNative();
+      await applyNativeZoom();      // 전환 후 색감·줌을 다시 적용해야 한다
+    } catch { await startFullNative(); }
+    saveSettings();
+    return;
+  }
   try { await startStream(); }
   catch (err) {
     facing = (facing === "user") ? "environment" : "user";
@@ -1603,8 +1652,24 @@ $("flipBtn").addEventListener("click", async () => {
 });
 
 /* ===== 탭 초점 ===== */
-$("camScreen").addEventListener("click", (e) => {
-  if (mode !== "cam" || e.target !== out) return;
+$("camScreen").addEventListener("click", async (e) => {
+  if (mode !== "cam") return;
+  // 네이티브 모드에서는 미리보기가 WebView 뒤에 있어 out을 기준으로 삼을 수 없다.
+  // 화면 좌표를 그대로 넘기고 회전·좌표 변환은 CameraX에 맡긴다.
+  if (isFullNative()) {
+    const r = stageRect();
+    const x = e.clientX - r.x, y = e.clientY - r.y;
+    if (x < 0 || y < 0 || x > r.width || y > r.height) return;
+    focusRing.style.left = e.clientX + "px";
+    focusRing.style.top = e.clientY + "px";
+    focusRing.classList.remove("go");
+    void focusRing.offsetWidth;
+    focusRing.classList.add("go");
+    try { await FilmCam().focus({ x, y, viewWidth: r.width, viewHeight: r.height }); }
+    catch { showToast("초점을 맞추지 못했어요"); }
+    return;
+  }
+  if (e.target !== out) return;
   focusRing.style.left = e.clientX + "px";
   focusRing.style.top = e.clientY + "px";
   focusRing.classList.remove("go");
@@ -1659,16 +1724,16 @@ let frameCount = 0, lastSeen = 0, maskDirty = false, lastRenderTs = 0;
 function loop(ts) {
   requestAnimationFrame(loop);
   if (mode !== "cam") return;
-  if (!nativeCam && video.readyState < 2) return;
+  if (!isFullNative() && video.readyState < 2) return;
   if (ts - lastRenderTs < 31) return;   // 30fps 상한
   lastRenderTs = ts;
 
   // 보정은 촬영 후에 하므로 프리뷰에서는 얼굴 인식을 돌리지 않는다.
   // 그만큼 프레임 처리가 가벼워져 미리보기 화질과 반응이 좋아진다.
   statusEl.classList.add("tracking");
-  statusText.textContent = "촬영 준비됨 · " + BUILD + (camMode === "system" ? " · 시스템카메라" : camMode === "native" ? " · 네이티브" : " · 웹");
+  statusText.textContent = "촬영 준비됨 · " + BUILD + (camMode === "system" ? " · 시스템카메라" : camMode === "fullnative" ? " · 완전네이티브" : camMode === "native" ? " · 프리뷰" : " · 웹");
 
-  if (nativeCam) return;   // 네이티브 프리뷰는 화면 뒤에서 직접 그려진다
+  if (isFullNative()) return;   // 네이티브 프리뷰는 화면 뒤에서 직접 그려진다
 
   // 프리뷰 렌더 (화각 + 화면 비율 크롭)
   // 보정(피부·잡티)은 촬영 후에 하지만, 색감과 그레인은 실시간으로 보여준다.
@@ -1861,6 +1926,7 @@ if (typeof window !== "undefined") {
   window.__testStart = () => startStream();
   window.__testCapture = () => captureHighRes();
   window.__testOpenShot = (s) => openShot(s);
+  window.__testFocus = (x,y) => tryFocus("single-shot", x, y);
   window.__testLoop = (ts) => { mode = "cam"; loop(ts); };
   window.__testGalleryAll = () => galleryAll();
 }

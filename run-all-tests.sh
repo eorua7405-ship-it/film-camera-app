@@ -12,3 +12,6 @@ node /tmp/ui-test.js || exit 1
 echo ""
 echo "═══ 4. 시스템 카메라 경로 ═══"
 SYS=1 node /tmp/ui-test.js || exit 1
+echo ""
+echo "═══ 5. 완전 네이티브 레이어 (CameraX + OpenGL) ═══"
+FULL=1 node /tmp/ui-test.js || exit 1

@@ -248,3 +248,42 @@
 
   .diag { font-size: 11px; color: #8de0b0; padding: 2px 0 4px; }
   .diag.bad { color: #ff9a9a; }
+
+  /* 네이티브 카메라: WebView 뒤에 카메라가 깔리므로
+     미리보기 영역만 투명하게 두고 나머지는 확실히 불투명하게 덮는다.
+     그래야 상단바·하단 팝업이 카메라에 잘리지 않는다. */
+  body.fullnative { background: transparent; }
+  body.fullnative #camScreen { background: transparent; }
+  body.fullnative .stagewrap { background: transparent; }
+  body.fullnative #out { display: none; }
+  body.fullnative .topbar { background: #000; padding-bottom: 12px; }
+  body.fullnative .bottom { background: #000; padding-top: 14px; }
+  body.fullnative .status {
+    top: calc(env(safe-area-inset-top, 0px) + 12px);
+    left: auto; right: 12px;
+  }
+  body.fullnative #editScreen, body.fullnative #galleryScreen { background: var(--bg); }
+
+  /* ===== 완전 네이티브 모드 =====
+     카메라는 WebView 뒤 네이티브 레이어가 그린다.
+     미리보기 영역만 투명하게 뚫고, UI가 카메라에 잘리지 않도록
+     상단·하단을 불투명하게 덮는다. */
+  body.fullnative { background: transparent; }
+  body.fullnative #camScreen { background: transparent; }
+  body.fullnative .stagewrap { background: transparent; }
+  body.fullnative #out { display: none; }
+  body.fullnative .topbar {
+    background: #000;
+    padding-bottom: 10px;
+  }
+  body.fullnative .status {
+    background: #000;
+    border-color: transparent;
+  }
+  body.fullnative .bottom {
+    background: #000;
+    padding-top: 14px;
+  }
+  /* 편집·갤러리는 카메라가 비치면 안 되므로 불투명 유지 */
+  body.fullnative #editScreen,
+  body.fullnative #galleryScreen { background: var(--bg); }

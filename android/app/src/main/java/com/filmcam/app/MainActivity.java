@@ -10,6 +10,8 @@ import com.getcapacitor.BridgeActivity;
 public class MainActivity extends BridgeActivity {
   @Override
   public void onCreate(Bundle savedInstanceState) {
+    // 완전 네이티브 카메라 플러그인 등록 (super.onCreate 이전에 해야 한다)
+    registerPlugin(FilmCameraPlugin.class);
     super.onCreate(savedInstanceState);
     // 앱 첫 실행 시 카메라 권한 요청 (WebView getUserMedia가 이 권한을 사용)
     if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)

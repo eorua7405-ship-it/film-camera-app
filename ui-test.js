@@ -87,33 +87,38 @@ window.FaceLandmarker = { createFromOptions: async () => globalThis.__fakeLandma
 // 네이티브 카메라 플러그인 스텁 — NATIVE=1 이면 네이티브 경로를 태운다
 const NATIVE = process.env.NATIVE === '1';
 const SYS = process.env.SYS === '1';
+const FULL = process.env.FULL === '1' || process.env.NATIVE === '1';
 const cpLog = [];
-if (NATIVE) {
+if (NATIVE || FULL) {
   const png1x1 = fakeFrameB64();
-  window.Capacitor = { isNativePlatform: () => true, Plugins: { CameraPreview: {
+  window.Capacitor = { isNativePlatform: () => true, Plugins: { FilmCamera: {
     start: async (o) => {
-      cpLog.push(['start', o.position, o.width, o.height, o.toBack]);
-      if (process.env.CRASH === '1') throw new Error('네이티브 크래시 시뮬레이션');
+      cpLog.push(['fn.start', o.position, o.width, o.height]);
+      if (process.env.CRASH === '1') throw new Error('네이티브 시작 실패 시뮬레이션');
     },
-    stop: async () => { cpLog.push(['stop']); },
-    flip: async () => { cpLog.push(['flip']); },
-    setFlashMode: async (o) => {
-      cpLog.push(['flash', o.flashMode]);
-      // 실제 기기에서는 여기서 자바 NPE로 앱이 죽었다. 호출 자체가 금지다.
-      throw new Error('setFlashMode는 호출되면 안 됩니다 (기기 크래시 원인)');
-    },
-    capture: async () => { cpLog.push(['capture']); return { value: png1x1 }; },
+    stop: async () => { cpLog.push(['fn.stop']); },
+    setLayout: async (o) => { cpLog.push(['fn.setLayout', o.width, o.height]); },
+    flip: async () => { cpLog.push(['fn.flip']); },
+    focus: async (o) => { cpLog.push(['fn.focus', Math.round(o.x), Math.round(o.y)]); },
+    setTorch: async (o) => { cpLog.push(['fn.setTorch', o.on]); },
+    setZoom: async (o) => { cpLog.push(['fn.setZoom', o.ratio]); return { zoom: Math.min(o.ratio, 2) }; },
+    setFilm: async (o) => { cpLog.push(['fn.setFilm', o.strength, o.grain]); },
+    capture: async () => { cpLog.push(['fn.capture']); return { value: png1x1 }; },
   }, Filesystem: { writeFile: async () => ({ uri: 'file:///x.jpg' }) } } };
 }
 if (SYS) {
+  // 시스템 카메라(폰 기본 카메라 앱) 스텁
   window.Capacitor = window.Capacitor || { isNativePlatform: () => true, Plugins: {} };
   window.Capacitor.Plugins = window.Capacitor.Plugins || {};
   window.Capacitor.Plugins.Camera = {
-    getPhoto: async (o) => { cpLog.push(['getPhoto', o.direction, o.quality]);
-      return { base64String: fakeFrameB64() }; },
+    getPhoto: async (o) => {
+      cpLog.push(['getPhoto', o.direction, o.quality]);
+      return { base64String: fakeFrameB64() };
+    },
   };
   window.Capacitor.Plugins.Filesystem = { writeFile: async () => ({ uri: 'file:///x.jpg' }) };
 }
+
 function fakeFrameB64() {
   return createCanvas(1080, 1440).toDataURL('image/jpeg').split(',')[1];
 }
@@ -224,7 +229,6 @@ setTimeout(() => {
       check('결과 캔버스 크기', doc.getElementById('editOut').width > 300,
         doc.getElementById('editOut').width + 'px');
       // processShot 단계별 추적
-      console.log('  [진단] landmarker =', typeof window.__fakeLandmarker);
       console.log('  [진단] drawGL 호출 인자들 =', JSON.stringify(calls.map(c => Object.keys(c))));
       if (NATIVE) {
         window.localStorage.removeItem('filmcam.settings.v1');
@@ -233,11 +237,49 @@ setTimeout(() => {
         click($('tgCamMode')); await new Promise(r => setTimeout(r, 600));
         check('setFlashMode 미호출', !cpLog.some(l => l[0] === 'flash'),
           '크래시 유발 호출 없음');
+        check('네이티브 레이어 시작', cpLog.some(l => l[0] === 'fn.start'), '브릿지 start 전달');
+        check('필름 신호 전달', cpLog.some(l => l[0] === 'fn.setFilm' && l[1] > 0),
+          '프리셋이 네이티브 GPU로 전달됨');
+        // 탭 초점: 화면 좌표가 네이티브로 전달되어야 한다
+        const stage = doc.querySelector('.stagewrap');
+        stage.dispatchEvent(new window.MouseEvent('click',
+          { bubbles: true, clientX: 300, clientY: 700 }));
+        await new Promise(r => setTimeout(r, 200));
+        check('탭 초점 전달', cpLog.some(l => l[0] === 'fn.focus'),
+          JSON.stringify(cpLog.find(l => l[0] === 'fn.focus') || []));
+        // 화각 변경이 렌즈 줌으로 전달되는가
+        const f50 = doc.querySelector('[data-focal="50"]');
+        if (f50) { click(f50); await new Promise(r => setTimeout(r, 200)); }
+        check('화각→렌즈 줌', cpLog.some(l => l[0] === 'fn.setZoom'),
+          JSON.stringify(cpLog.find(l => l[0] === 'fn.setZoom') || []));
+        check('투명 레이아웃', doc.body.classList.contains('fullnative'), 'body.fullnative');
         check('네이티브 모드 진입', doc.getElementById('tgCamMode').textContent === '네이티브',
           doc.getElementById('tgCamMode').textContent);
       }
-      if (SYS) { click($('tgCamMode')); await new Promise(r => setTimeout(r, 400)); }
+      if (FULL) {
+        window.localStorage.removeItem('filmcam.settings.v1');
+        click($('tgCamMode')); await new Promise(r => setTimeout(r, 700));
+        console.log('  [진단] toast =', doc.getElementById('toast').textContent);
+        check('완전네이티브 진입', doc.getElementById('tgCamMode').textContent === '네이티브',
+          doc.getElementById('tgCamMode').textContent);
+        check('네이티브 레이어 시작', cpLog.some(l => l[0] === 'fn.start'), '카메라 레이어 기동');
+        check('UI 잘림 방지', doc.body.classList.contains('fullnative'),
+          '상하단 불투명 처리');
+        check('필름 신호 전달', cpLog.some(l => l[0] === 'fn.setFilm'), '브릿지로 프리셋 전송');
+        cpLog.length = 0;
+        window.__testFocus && window.__testFocus(0.3, 0.7);
+        await new Promise(r => setTimeout(r, 200));
+        check('탭 초점 동작', cpLog.some(l => l[0] === 'fn.focus'), '초점 명령 전달됨');
+        await window.__testCapture();
+        check('네이티브 촬영', cpLog.some(l => l[0] === 'fn.capture'), '센서 원본 수신');
+      }
       if (SYS) {
+        click($('tgCamMode')); await new Promise(r => setTimeout(r, 400));   // 웹 → 네이티브(없으면 건너뜀)
+        if ($('tgCamMode').textContent !== '시스템') {
+          click($('tgCamMode')); await new Promise(r => setTimeout(r, 400));
+        }
+      }
+if (SYS) {
         check('시스템 모드 전환', doc.getElementById('tgCamMode').textContent === '시스템',
           doc.getElementById('tgCamMode').textContent);
         await window.__testCapture();   // 전환 후 다시 촬영
@@ -247,9 +289,9 @@ setTimeout(() => {
         check('촬영 계속 가능', doc.getElementById('editOut').width > 300,
           doc.getElementById('editOut').width + 'px');
       } else if (NATIVE) {
-        check('네이티브 시작', cpLog.some(l => l[0] === 'start'), JSON.stringify(cpLog[0] || []));
-        check('네이티브 촬영', cpLog.some(l => l[0] === 'start'), '플러그인 연동 정상');
-        check('투명화 미사용', !cpLog.some(l => l[0]==='start' && l[4] === true), 'toBack 사용 안 함');
+        check('네이티브 시작', cpLog.some(l => l[0] === 'fn.start'), JSON.stringify(cpLog[0] || []));
+        check('네이티브 촬영', cpLog.some(l => l[0] === 'fn.start'), '플러그인 연동 정상');
+        check('투명화 미사용', !cpLog.some(l => l[0]==='fn.start' && l[4] === true), 'toBack 사용 안 함');
         check('권한 선확보', cpLog.length > 0, 'getUserMedia 후 start');
         await new Promise(r => setTimeout(r, 3300));   // 안전 판정 대기
         check('크래시 표시 정리', !window.localStorage.getItem('filmcam.nativeTry'),
@@ -265,7 +307,7 @@ setTimeout(() => {
         Math.max(...(window.__detectSizes[0] || [9999])) <= 1024,
         '검출 입력 크기 ' + JSON.stringify(window.__detectSizes && window.__detectSizes[0]));
       // 갤러리에서 사진을 열면 편집 화면 진단이 갱신된다
-      if (SYS) {
+if (SYS) {
         check('시스템 카메라 호출', cpLog.some(l => l[0] === 'getPhoto'), '기본 카메라 앱 실행');
         check('시스템 모드 표시', /시스템카메라/.test(doc.getElementById('statusText').textContent),
           doc.getElementById('statusText').textContent);
@@ -275,7 +317,7 @@ setTimeout(() => {
       window.__testLoop && window.__testLoop(performance.now() + 5000);
       const previewCall = calls.find(c => c.film !== undefined && c.smooth === undefined);
       // 네이티브 모드는 프리뷰를 네이티브 뷰가 직접 그리므로 GL을 타지 않는다
-      check('실시간 필름 프리뷰', NATIVE ? true : (!!previewCall && previewCall.film > 0),
+      check('실시간 필름 프리뷰', (NATIVE || FULL) ? true : (!!previewCall && previewCall.film > 0),
         previewCall ? 'film=' + previewCall.film : 'GL 통과 안 함');
       check('프리뷰는 얼굴연산 없음', !previewCall || !previewCall.smooth,
         '피부 보정은 프리뷰에서 제외');
@@ -286,7 +328,7 @@ setTimeout(() => {
       check('편집 진단 표시', /얼굴 인식/.test(doc.getElementById('editDiag').textContent),
         doc.getElementById('editDiag').textContent);
       const shots = await window.__testGalleryAll();
-      check('갤러리 자동저장', shots.length === (SYS ? 2 : 1), shots.length + '장');
+      check('갤러리 자동저장', shots.length === ((SYS || FULL) ? 2 : 1), shots.length + '장');
     } catch (e) {
       check('촬영 흐름', false, e.message);
     }
