@@ -1,4 +1,4 @@
-const BUILD = "v11";
+const BUILD = "v12";
 
 // 어떤 오류든 화면에 보이게 한다. 원인을 모른 채 앱이 멈추는 상황을 막는다.
 window.addEventListener("error", (e) => {
@@ -139,7 +139,8 @@ $("tgCamMode").addEventListener("click", async () => {
     showToast("이 빌드에는 네이티브 카메라가 없어요 (준비 중인 기능)");
     return;
   }
-  showToast("네이티브 카메라를 시도해요 (실험 기능)");
+  if (!confirm("네이티브 카메라는 실험 기능이에요.\n일부 기기에서 앱이 종료될 수 있고, 그 경우 다시 켜면 웹 방식으로 돌아옵니다.\n\n시도할까요?")) return;
+  showToast("네이티브 카메라를 여는 중…");
   try { localStorage.removeItem(NATIVE_FLAG); } catch {}
   nativeBlocked = false;
   if (video.srcObject) { video.srcObject.getTracks().forEach(t => t.stop()); video.srcObject = null; }
@@ -159,6 +160,7 @@ $("tgContour").addEventListener("click", (e) => {
   contourOn = !contourOn;
   e.target.classList.toggle("on", contourOn);
   e.target.textContent = contourOn ? "켜짐" : "꺼짐";
+  if (mode === "edit") { uploadWarp(); editRender(); }
   saveSettings();
 });
 
@@ -553,49 +555,50 @@ void main() {
   }
 
   // ===== 플래시 필터: 직광 온카메라 플래시 룩 =====
-  // 실제 보정 워크플로우를 그대로 따라간다:
-  // 전체를 눌러 깔고 → 가상 광원(카메라 정면·살짝 위)에서 하이라이트를 얹고 →
-  // 배경·머리카락 주변에 깊은 그림자 → 입술 광택 → 창백한 피부톤 → 그레인
+  // 레퍼런스의 핵심은 '원형 스포트라이트'가 아니다.
+  // 플래시는 사람에게 고르게 닿고, 뒤에 있는 배경만 거리 때문에 뚝 떨어진다.
+  // 그래서 피사체는 균일하게 밝히고, 배경은 (그라데이션 없이) 균일하게 눌러 분리한다.
   if (uFlash > 0.005) {
-    // 광원은 렌즈 바로 위. 얼굴 중심보다 조금 위에서 쏜다.
-    vec2 lightP = uFlashC + vec2(0.0, 0.06 / max(uAspect, 0.001));
-    vec2 dp = uv - lightP; dp.y *= uAspect;
+    vec2 dp = uv - uFlashC; dp.y *= uAspect;
     float d = length(dp) / max(uFlashR, 0.001);
-    float key = 1.0 / (1.0 + d * d * 2.2);            // 역제곱 감쇠
 
-    // 피사체/배경 분리: 얼굴 마스크 + 광원 근접도로 '빛 받는 영역'을 정의
-    float subject = clamp(max(skinM, key * key * 1.6), 0.0, 1.0);
+    // 피사체 근사: 얼굴 마스크 + 얼굴 주변의 넓고 완만한 영역(머리·목·어깨)
+    float around = 1.0 - smoothstep(0.85, 1.9, d);
+    float subject = clamp(max(skinM, around), 0.0, 1.0);
+    float bg = 1.0 - subject;
 
-    // 1) 전체를 어둡게 깔아 배경을 죽인다
-    res *= mix(1.0, 0.60, uFlash);
+    // 1) 배경만 눌러 피사체를 분리한다 (거리 감쇠는 배경에서 거의 균일하다)
+    res *= mix(1.0, mix(1.0, 0.42, bg), uFlash);
 
-    // 2) 얼굴 전면(이마·콧대)에 하이라이트를 얹는다
-    float front = key * (0.50 + 0.50 * skinM);
-    res *= 1.0 + uFlash * front * 1.55;
+    // 2) 피사체는 고르게 밝힌다 — 얼굴 안에서 밝기 차이를 만들지 않는다
+    res *= 1.0 + uFlash * subject * 0.30;
 
-    // 3) 몸통·머리카락 주변과 배경은 더 깊게 눌러 분리한다
-    res *= 1.0 - uFlash * (1.0 - subject) * 0.50;
+    // 3) 직광 특유의 '살짝 날아간' 하이라이트 (부드러운 롤오프)
+    vec3 blown = 1.0 - (1.0 - res) * (1.0 - res) * 0.90;
+    res = mix(res, blown, uFlash * subject * 0.45);
 
-    // 4) 입술: 선명한 색과 광택
+    // 4) 피부 광택 — 정면광이 만드는 반사
+    float ls = lumOf(res);
+    res += smoothstep(0.68, 0.95, ls) * uFlash * skinM * 0.13;
+
+    // 5) 정면광은 얼굴 그림자를 얕게 만든다
+    res = mix(res, pow(max(res, 0.0), vec3(0.88)), uFlash * skinM * 0.55);
+
+    // 6) 입술: 선명한 색과 광택
     vec2 lp = (uv - uLip.xy) / max(uLip.zw, vec2(0.001));
     float lipW = (1.0 - smoothstep(0.55, 1.0, length(lp))) * step(0.0001, uLip.z);
-    res = mix(res, res * vec3(1.14, 0.90, 0.94), uFlash * lipW * 0.85);
-    res += smoothstep(0.62, 0.95, lumOf(res)) * uFlash * lipW * 0.22;
+    res = mix(res, res * vec3(1.12, 0.92, 0.95), uFlash * lipW * 0.75);
+    res += smoothstep(0.60, 0.94, lumOf(res)) * uFlash * lipW * 0.18;
 
-    // 5) 피부를 살짝 창백하게 (직광이 혈색을 날린다)
-    vec3 pale = mix(res, vec3(lumOf(res)), 0.20) * vec3(1.03, 1.015, 1.04);
-    res = mix(res, pale, uFlash * skinM * 0.65);
+    // 7) 혈색이 날아간 창백한 피부톤
+    vec3 pale = mix(res, vec3(lumOf(res)), 0.16) * vec3(1.025, 1.01, 1.035);
+    res = mix(res, pale, uFlash * skinM * 0.55);
 
-    // 6) 하이라이트 광택
-    res += smoothstep(0.72, 0.97, lumOf(res)) * uFlash * skinM * 0.10;
-
-    // 7) Y2K 파파라치 톤: 대비를 올리고 살짝 차갑게
-    res = (res - 0.5) * (1.0 + 0.20 * uFlash) + 0.5;
-    res *= mix(vec3(1.0), vec3(1.015, 0.995, 1.035), uFlash);
-
-    // 8) 필름 그레인 (직광 룩의 거친 질감)
+    // 8) Y2K 파파라치 톤 + 필름 그레인
+    res = (res - 0.5) * (1.0 + 0.14 * uFlash) + 0.5;
+    res *= mix(vec3(1.0), vec3(1.012, 0.997, 1.03), uFlash);
     float fg = fract(sin(dot(gl_FragCoord.xy + vec2(uTime * 331.0), vec2(12.9898, 78.233))) * 43758.5453) - 0.5;
-    res += fg * uFlash * 0.040;
+    res += fg * uFlash * 0.035;
   }
 
   // ===== 선명도 =====
@@ -902,6 +905,20 @@ async function captureHighRes() {
 
 // 찍은 사진에 보정 파이프라인 적용 (실시간이 아니라 후보정 단계)
 let lastDetectWhy = "";
+
+// 윤곽 변위 맵을 만들어 GPU에 올린다 (실시간이 아니라 촬영 후 시점)
+function uploadWarp() {
+  if (!glOK || !editLandmarks) return;
+  warpCanvas.width = maskCanvas.width;
+  warpCanvas.height = maskCanvas.height;
+  if (contourOn) computeWarpMap(warpCanvas.width, warpCanvas.height);
+  else {
+    warpCtx.fillStyle = "rgb(128,128,0)";   // 중립 (이동 없음)
+    warpCtx.fillRect(0, 0, warpCanvas.width, warpCanvas.height);
+  }
+  gl.activeTexture(gl.TEXTURE2);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, warpCanvas);
+}
 const detectCanvas = document.createElement("canvas");
 const detectCtx = detectCanvas.getContext("2d", { willReadFrequently: true });
 
@@ -948,7 +965,7 @@ async function processShot() {
     buildFaceMask(maskCanvas.width, maskCanvas.height, L);
     gl.activeTexture(gl.TEXTURE1);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, maskCanvas);
-
+    uploadWarp();
   }
   editRender();
 }
@@ -1124,6 +1141,7 @@ async function openShot(shot) {
       buildFaceMask(maskCanvas.width, maskCanvas.height, editLandmarks);
       gl.activeTexture(gl.TEXTURE1);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, maskCanvas);
+      uploadWarp();
     }
     editOut.width = capCanvas.width; editOut.height = capCanvas.height;
     mode = "edit";
@@ -1375,16 +1393,16 @@ async function startNative() {
     await stopNative();
     // 옵션은 문서화된 최소 항목만 사용한다. 기기별로 지원되지 않는 옵션이
     // 네이티브 크래시를 일으킨 사례가 있어 실험적 옵션은 넣지 않는다.
+    // toBack:true는 WebView 전체를 투명하게 만드는데, 이 과정이 기기에 따라
+    // 앱을 종료시키는 것으로 보인다. 투명화를 쓰지 않고 미리보기 영역 '위에'
+    // 카메라 뷰를 얹는다. UI(상단바·하단바)는 그 영역 밖에 있으므로 가려지지 않는다.
     await cp.start({
-      parent: "nativeCam",
-      className: "nativeCamView",
       position: facing === "user" ? "front" : "rear",
       x: r.x, y: r.y, width: r.width, height: r.height,
-      toBack: true,
+      toBack: false,
       disableAudio: true,
     });
     nativeCam = true;
-    document.body.classList.add("native");
     // 여기까지 살아남았으면 안전하다고 보고 표시를 지운다
     setTimeout(() => { try { localStorage.removeItem(NATIVE_FLAG); } catch {} }, 3000);
     await applyNativeFlash();

@@ -50,6 +50,7 @@ window.HTMLMediaElement.prototype.play = function () { return Promise.resolve();
 window.requestAnimationFrame = (cb) => setTimeout(() => cb(performance.now()), 16);
 window.cancelAnimationFrame = (id) => clearTimeout(id);
 window.matchMedia = () => ({ matches: false, addListener() {}, removeListener() {} });
+window.confirm = () => true;
 window.createImageBitmap = async () => ({ width: 1080, height: 1440, close() {} });
 // data URL을 즉시 로드된 것으로 처리 (네이티브 촬영 경로 검증용)
 Object.defineProperty(window.Image.prototype, 'src', {
@@ -90,7 +91,7 @@ if (NATIVE) {
   const png1x1 = fakeFrameB64();
   window.Capacitor = { isNativePlatform: () => true, Plugins: { CameraPreview: {
     start: async (o) => {
-      cpLog.push(['start', o.position, o.width, o.height]);
+      cpLog.push(['start', o.position, o.width, o.height, o.toBack]);
       if (process.env.CRASH === '1') throw new Error('네이티브 크래시 시뮬레이션');
     },
     stop: async () => { cpLog.push(['stop']); },
@@ -213,13 +214,13 @@ setTimeout(() => {
       console.log('  [진단] drawGL 호출 인자들 =', JSON.stringify(calls.map(c => Object.keys(c))));
       if (NATIVE) { click($('tgCamMode')); await new Promise(r => setTimeout(r, 400)); }
       if (NATIVE && process.env.CRASH === '1') {
-        check('크래시 시 폴백', !doc.body.classList.contains('native'), '웹 방식으로 전환됨');
+        check('크래시 시 폴백', /웹/.test(doc.getElementById('statusText').textContent), '웹 방식으로 전환됨');
         check('촬영 계속 가능', doc.getElementById('editOut').width > 300,
           doc.getElementById('editOut').width + 'px');
       } else if (NATIVE) {
         check('네이티브 시작', cpLog.some(l => l[0] === 'start'), JSON.stringify(cpLog[0] || []));
         check('네이티브 촬영', cpLog.some(l => l[0] === 'start'), '플러그인 연동 정상');
-        check('네이티브 모드 CSS', doc.body.classList.contains('native'), 'body.native');
+        check('투명화 미사용', !cpLog.some(l => l[0]==='start' && l[4] === true), 'toBack 사용 안 함');
         check('권한 선확보', cpLog.length > 0, 'getUserMedia 후 start');
         await new Promise(r => setTimeout(r, 3300));   // 안전 판정 대기
         check('크래시 표시 정리', !window.localStorage.getItem('filmcam.nativeTry'),

@@ -244,8 +244,18 @@ tests.push(['플래시(피사체 분리)', near > 6 && far2 < -25,
   `얼굴 ${near > 0 ? '+' : ''}${near} / 배경 ${far2} (배경이 확실히 죽어야 정상)`]);
 // 입술 영역이 주변 피부보다 붉고 밝은가
 const redOf = (p,x,y)=>p[((y*W)+x)*4] - (p[((y*W)+x)*4+1]+p[((y*W)+x)*4+2])/2;
-tests.push(['플래시(입술 광택)', redOf(fl,64,45) - redOf(base,64,45) > redOf(fl,64,85) - redOf(base,64,85),
-  '입술이 주변보다 붉어짐']);
+// 얼굴 안에 원형 스포트라이트가 생기면 안 된다 (레퍼런스는 고르게 밝다)
+const faceDeltas = [];
+for (let y = 40; y < 90; y += 6) for (let x = 40; x < 90; x += 6) faceDeltas.push(at(fl,x,y) - at(base,x,y));
+const fMean = faceDeltas.reduce((a,b)=>a+b,0)/faceDeltas.length;
+const fSpread = Math.max(...faceDeltas) - Math.min(...faceDeltas);
+tests.push(['플래시(스포트라이트 없음)', fSpread < 45,
+  `얼굴 내 밝기 편차 ${fSpread} (작아야 고르게 빛남, 평균 ${fMean.toFixed(0)})`]);
+let lipBest = -999, lipY = 0;
+for (let y = 30; y < 100; y++) { const v = redOf(fl,64,y) - redOf(base,64,y); if (v > lipBest) { lipBest = v; lipY = y; } }
+const lipRef = redOf(fl,64,20) - redOf(base,64,20);
+tests.push(['플래시(입술 광택)', lipBest > lipRef + 2,
+  '입술부 붉은기 ' + lipBest.toFixed(1) + ' @y=' + lipY + ' / 주변 ' + lipRef.toFixed(1)]);
 tests.push(['플래시(끄면 무변화)', Math.abs(at(render({ flash: 0 }), 64, 64) - at(base, 64, 64)) <= 1,
   '플래시 0에서 원본 유지']);
 
